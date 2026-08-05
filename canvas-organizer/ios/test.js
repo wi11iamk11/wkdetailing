@@ -8,6 +8,8 @@
  *   node ios/test.js
  */
 
+const fs = require('node:fs');
+const path = require('node:path');
 const http = require('node:http');
 const assert = require('node:assert');
 
@@ -50,6 +52,40 @@ test('normalizeHost survives a stray space from iOS autocorrect', () => {
   assert.equal(lib.normalizeHost('sdhc .instructure.com'), 'https://sdhc.instructure.com');
   assert.equal(lib.normalizeHost('sdhc. instructure.com'), 'https://sdhc.instructure.com');
   assert.equal(lib.normalizeHost('sd hc . instructure . com'), 'https://sdhc.instructure.com');
+});
+
+/*
+ * Scriptable's JS engine (JavaScriptCore without WebKit) has no global `URL`
+ * or `URLSearchParams` — code written and tested under Node, which has both,
+ * can still throw "Can't find variable: URL" the moment it actually runs on
+ * an iPhone. This is exactly what happened: normalizeHost used `new URL()`,
+ * passed every Node test, and failed on every single device.
+ *
+ * These two checks stand in for that gap: one deletes the globals to prove
+ * the code doesn't reach for them, the other statically greps the source so
+ * the pattern can't quietly come back in a later edit.
+ */
+test('normalizeHost works with no global URL/URLSearchParams (simulates Scriptable)', () => {
+  const savedURL = global.URL;
+  const savedParams = global.URLSearchParams;
+  delete global.URL;
+  delete global.URLSearchParams;
+  try {
+    assert.equal(lib.normalizeHost('sdhc.instructure.com'), 'https://sdhc.instructure.com');
+    assert.equal(
+      lib.normalizeHost('https://s.instructure.com/courses/12/assignments'),
+      'https://s.instructure.com',
+    );
+    assert.throws(() => lib.normalizeHost('not a domain!!'), /not a valid Canvas address/);
+  } finally {
+    global.URL = savedURL;
+    global.URLSearchParams = savedParams;
+  }
+});
+test('CanvasOrganizer.js never references URL or URLSearchParams', () => {
+  const source = fs.readFileSync(path.join(__dirname, 'CanvasOrganizer.js'), 'utf8');
+  assert.doesNotMatch(source, /\bnew\s+URL\s*\(/, 'no global URL() on Scriptable — build strings by hand');
+  assert.doesNotMatch(source, /\.searchParams\b/, 'no URLSearchParams on Scriptable — build query strings by hand');
 });
 
 test('parseNextLink finds rel=next among several links', () => {

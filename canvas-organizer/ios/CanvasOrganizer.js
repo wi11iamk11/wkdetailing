@@ -23,6 +23,10 @@ const DAY = 86_400_000;
  * so it can be unit-tested off-device (see ios/test.js).
  */
 
+// Scriptable's JS engine is JavaScriptCore without WebKit's DOM layer, so
+// there is no global `URL` class (or `URLSearchParams`) — only plain
+// ECMAScript. Every URL operation below is done with regex and string
+// concatenation instead, so it works on-device as well as under Node's tests.
 function normalizeHost(input) {
   // A real Canvas address never contains whitespace, but the iOS keyboard
   // (autocorrect, predictive-text taps) loves to insert a stray space mid-typing.
@@ -30,13 +34,12 @@ function normalizeHost(input) {
   const raw = String(input ?? '').replace(/\s+/g, '');
   if (!raw) throw new Error('Canvas address is required');
   const withScheme = /^https?:\/\//i.test(raw) ? raw : `https://${raw}`;
-  let url;
-  try {
-    url = new URL(withScheme);
-  } catch {
+  const match = withScheme.match(/^(https?):\/\/([^/?#]+)/i);
+  const host = match?.[2];
+  if (!match || !/^[a-z0-9.-]+(:\d+)?$/i.test(host)) {
     throw new Error(`"${raw}" is not a valid Canvas address`);
   }
-  return url.origin;
+  return `${match[1].toLowerCase()}://${host.toLowerCase()}`;
 }
 
 function parseNextLink(header) {
@@ -145,14 +148,18 @@ function subtitleFor(item, now = Date.now()) {
  */
 async function loadEverything(fetchJson, host, token) {
   const getAll = async (path, params = {}) => {
-    const url = new URL(path, host);
-    url.searchParams.set('per_page', '100');
+    // Query string built by hand (see the note above normalizeHost). This only
+    // runs for page 1 — later pages reuse Canvas's own "next" link as-is.
+    const query = [];
+    const add = (key, value) => query.push(`${encodeURIComponent(key)}=${encodeURIComponent(value)}`);
+    add('per_page', '100');
     for (const [key, value] of Object.entries(params)) {
-      if (Array.isArray(value)) value.forEach((v) => url.searchParams.append(key, v));
-      else url.searchParams.set(key, value);
+      if (Array.isArray(value)) value.forEach((v) => add(key, v));
+      else add(key, value);
     }
+
     const out = [];
-    let target = url.toString();
+    let target = `${host}${path}?${query.join('&')}`;
     for (let page = 0; page < 5 && target; page++) {
       const { body, next } = await fetchJson(target, token);
       if (!Array.isArray(body)) throw new Error(`Unexpected response from ${path}`);
