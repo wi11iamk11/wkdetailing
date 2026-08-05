@@ -30,6 +30,12 @@ leave the computer you run it on.
 Notes, statuses and personal tasks are yours — they're kept locally and survive
 every re-sync.
 
+## On iPhone or iPad
+
+This app is a local server, so it can't run on iOS. For your phone there's a
+companion script that talks to Canvas directly, no computer needed —
+see [`ios/README.md`](ios/README.md).
+
 ## Setup
 
 You need [Node.js](https://nodejs.org) 18 or newer. There are no dependencies to

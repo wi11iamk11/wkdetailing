@@ -1,0 +1,4 @@
+{
+  "type": "commonjs",
+  "//": "Keeps this folder CommonJS so the Scriptable script can be unit-tested by Node; the parent package is an ES module."
+}
