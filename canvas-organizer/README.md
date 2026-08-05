@@ -41,6 +41,20 @@ see [`ios/README.md`](ios/README.md).
 You need [Node.js](https://nodejs.org) 18 or newer. There are no dependencies to
 install.
 
+### Windows
+
+1. Install [Node.js](https://nodejs.org) — download the **LTS** version, run the
+   installer, and click through with the default options.
+2. Download this repository and open the `canvas-organizer` folder.
+3. Double-click **`Start.bat`**.
+
+A window opens showing the app starting, and your browser opens to it automatically
+a couple of seconds later. Keep that window open while you use the app — closing it
+stops the server. Next time, just double-click `Start.bat` again; nothing to
+reinstall.
+
+### macOS / Linux
+
 ```bash
 cd canvas-organizer
 npm start
@@ -94,6 +108,7 @@ server.js         HTTP server: serves the UI, proxies Canvas, merges local state
 lib/canvas.js     Canvas REST client — pagination, retries, normalizing records
 lib/store.js      Atomic JSON persistence for config, cache and your edits
 public/           The dashboard (plain HTML/CSS/JS, no build step)
+Start.bat         Windows launcher: checks for Node, starts the server, opens your browser
 ```
 
 The browser never sees your Canvas token: the page talks only to this app, and
@@ -113,3 +128,22 @@ started yet won't appear.
 
 **An assignment is missing** — unpublished assignments are skipped. If a whole
 course fails to load, a warning appears above the list saying which one.
+
+**(Windows) The window flashes and closes immediately** — that's `Start.bat`
+hitting an error before it can print it. Right-click `Start.bat` → **Edit** to
+open it in Notepad, add the line `pause` at the very end, save, and run it again;
+the window will now stay open and show what went wrong.
+
+**(Windows) "Node.js needs..." or the window says node isn't recognized** —
+Node wasn't installed, or the installer needs a restart to update your PATH.
+Reinstall from [nodejs.org](https://nodejs.org), then log out and back in (or
+restart) before trying `Start.bat` again.
+
+**(Windows) Firewall popup on first run** — Windows may ask whether to allow
+Node.js network access. It's safe either way: the app only listens on
+`127.0.0.1`, so nothing outside this computer can reach it regardless of what
+you click.
+
+**(Windows) "Port already in use"** — another copy of the app is already
+running (maybe from an earlier `Start.bat` window you forgot about). Close that
+window, or find and close it another way, before starting a new one.

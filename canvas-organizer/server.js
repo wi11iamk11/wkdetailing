@@ -277,6 +277,17 @@ const server = http.createServer(async (req, res) => {
   }
 });
 
+server.on('error', (err) => {
+  if (err.code === 'EADDRINUSE') {
+    console.error(
+      `\n  Port ${PORT} is already in use — Canvas Organizer might already be running in another window.\n` +
+        `  Close that window, or run with a different port, e.g. PORT=8080 npm start\n`,
+    );
+    process.exit(1);
+  }
+  throw err;
+});
+
 server.listen(PORT, HOST, () => {
   console.log(`\n  Canvas Organizer running at http://${HOST}:${PORT}\n`);
 });
