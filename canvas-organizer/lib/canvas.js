@@ -18,7 +18,10 @@ export class CanvasError extends Error {
 
 /** Accepts "myschool.instructure.com" or a full URL; returns a clean origin. */
 export function normalizeBaseUrl(input) {
-  const raw = String(input ?? '').trim();
+  // A real Canvas address never contains whitespace, but phone keyboards
+  // (autocorrect, predictive-text taps) love to insert a stray space mid-typing.
+  // Stripping it all, not just the ends, turns that into a non-issue.
+  const raw = String(input ?? '').replace(/\s+/g, '');
   if (!raw) throw new CanvasError('Canvas URL is required', { status: 400 });
   const withScheme = /^https?:\/\//i.test(raw) ? raw : `https://${raw}`;
   let url;

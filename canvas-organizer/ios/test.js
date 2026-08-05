@@ -46,6 +46,11 @@ test('normalizeHost trims whitespace and fixes case', () => {
 test('normalizeHost rejects empty input', () => {
   assert.throws(() => lib.normalizeHost('   '), /required/);
 });
+test('normalizeHost survives a stray space from iOS autocorrect', () => {
+  assert.equal(lib.normalizeHost('sdhc .instructure.com'), 'https://sdhc.instructure.com');
+  assert.equal(lib.normalizeHost('sdhc. instructure.com'), 'https://sdhc.instructure.com');
+  assert.equal(lib.normalizeHost('sd hc . instructure . com'), 'https://sdhc.instructure.com');
+});
 
 test('parseNextLink finds rel=next among several links', () => {
   const header =

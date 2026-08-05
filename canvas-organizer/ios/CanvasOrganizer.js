@@ -24,7 +24,10 @@ const DAY = 86_400_000;
  */
 
 function normalizeHost(input) {
-  const raw = String(input ?? '').trim();
+  // A real Canvas address never contains whitespace, but the iOS keyboard
+  // (autocorrect, predictive-text taps) loves to insert a stray space mid-typing.
+  // Stripping it all, not just the ends, turns that into a non-issue.
+  const raw = String(input ?? '').replace(/\s+/g, '');
   if (!raw) throw new Error('Canvas address is required');
   const withScheme = /^https?:\/\//i.test(raw) ? raw : `https://${raw}`;
   let url;
