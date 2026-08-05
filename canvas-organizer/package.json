@@ -1,0 +1,14 @@
+{
+  "name": "canvas-organizer",
+  "version": "1.0.0",
+  "private": true,
+  "description": "A local dashboard that pulls your Canvas courses and assignments into one organized to-do list.",
+  "type": "module",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

@@ -1,0 +1,4 @@
+# Local state: contains your Canvas access token and cached coursework.
+data/
+node_modules/
+*.log

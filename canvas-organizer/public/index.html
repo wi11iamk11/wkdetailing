@@ -1,0 +1,104 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Canvas Organizer</title>
+    <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>📚</text></svg>" />
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <!-- Connect screen -->
+    <section id="setup" class="setup" hidden>
+      <form class="card setup-card" id="connect-form">
+        <h1>📚 Canvas Organizer</h1>
+        <p class="muted">
+          Pulls your courses and assignments out of Canvas and turns them into one
+          sorted to-do list. Everything stays on this computer.
+        </p>
+
+        <label for="baseUrl">Your Canvas address</label>
+        <input id="baseUrl" name="baseUrl" placeholder="myschool.instructure.com" autocomplete="off" required />
+
+        <label for="token">Access token</label>
+        <input id="token" name="token" type="password" placeholder="Paste your token" autocomplete="off" required />
+
+        <details class="hint">
+          <summary>How do I get a token?</summary>
+          <ol>
+            <li>Open Canvas and go to <strong>Account → Settings</strong>.</li>
+            <li>Scroll to <strong>Approved Integrations</strong> and click <strong>+ New Access Token</strong>.</li>
+            <li>Name it "Canvas Organizer", leave the expiry blank, and click <strong>Generate Token</strong>.</li>
+            <li>Copy the token and paste it above — Canvas only shows it once.</li>
+          </ol>
+        </details>
+
+        <button class="primary" type="submit">Connect</button>
+        <p class="error" id="setup-error" hidden></p>
+      </form>
+    </section>
+
+    <!-- Dashboard -->
+    <div id="app" class="app" hidden>
+      <header class="topbar">
+        <div class="brand">📚 <strong>Canvas Organizer</strong></div>
+        <div class="topbar-right">
+          <span class="muted" id="synced-at"></span>
+          <button id="sync" class="primary">Sync</button>
+          <button id="disconnect" class="ghost" title="Forget this Canvas account">Disconnect</button>
+        </div>
+      </header>
+
+      <div class="stats" id="stats"></div>
+
+      <main class="layout">
+        <aside class="sidebar">
+          <nav class="filters" id="buckets"></nav>
+          <h3 class="sidebar-title">Courses</h3>
+          <nav class="filters" id="courses"></nav>
+        </aside>
+
+        <section class="content">
+          <div class="toolbar">
+            <input id="search" type="search" placeholder="Search assignments…" />
+            <label class="toggle">
+              <input type="checkbox" id="hide-done" checked />
+              Hide finished
+            </label>
+            <select id="sort">
+              <option value="due">Sort by due date</option>
+              <option value="course">Sort by course</option>
+              <option value="points">Sort by points</option>
+              <option value="name">Sort by name</option>
+            </select>
+            <button id="add-task" class="ghost">+ Task</button>
+          </div>
+
+          <div id="warnings" class="warnings" hidden></div>
+          <div id="list" class="list"></div>
+        </section>
+      </main>
+    </div>
+
+    <!-- Add-task dialog -->
+    <dialog id="task-dialog">
+      <form method="dialog" id="task-form">
+        <h2>New personal task</h2>
+        <label for="task-name">What needs doing?</label>
+        <input id="task-name" required maxlength="300" placeholder="Read chapter 4" />
+        <label for="task-due">Due (optional)</label>
+        <input id="task-due" type="datetime-local" />
+        <label for="task-course">Course (optional)</label>
+        <select id="task-course"></select>
+        <menu>
+          <button value="cancel" class="ghost" formnovalidate>Cancel</button>
+          <button value="save" class="primary">Add task</button>
+        </menu>
+      </form>
+    </dialog>
+
+    <div id="toast" class="toast" hidden></div>
+
+    <script src="/app.js" type="module"></script>
+  </body>
+</html>
