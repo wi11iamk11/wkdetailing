@@ -1,0 +1,1066 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>voice visualizer — living circuit board</title>
+<style>
+  html,body{margin:0;padding:0;height:100%;background:#04070c;overflow:hidden;}
+  body{cursor:none;font:12px/1.4 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;}
+  canvas{display:block;width:100vw;height:100vh;}
+  .hud{position:fixed;color:#5fd0e8;letter-spacing:.14em;text-transform:uppercase;
+       pointer-events:none;user-select:none;text-shadow:0 0 8px rgba(40,190,230,.55);
+       transition:opacity .35s ease;}
+  #tag{left:18px;bottom:14px;font-size:11px;opacity:.72;}
+  #tag b{color:#bdf3ff;font-weight:600;}
+  #tag .dot{display:inline-block;width:6px;height:6px;border-radius:50%;
+            background:#7fe9ff;margin-right:7px;vertical-align:1px;
+            box-shadow:0 0 8px #7fe9ff;}
+  #tag.alert .dot{background:#ff4a4a;box-shadow:0 0 10px #ff4a4a;}
+  #fps{right:18px;top:14px;font-size:11px;opacity:0;color:#8fe4f7;}
+  #hint{right:18px;bottom:14px;font-size:10px;opacity:.30;}
+  .hidden{opacity:0 !important;}
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div class="hud" id="tag"><span class="dot"></span><b>boot</b></div>
+<div class="hud" id="fps">-- fps</div>
+<div class="hud" id="hint">space · flythrough &nbsp;&nbsp; f · fps</div>
+
+<script>
+"use strict";
+/* =========================================================================
+   voice visualizer — living circuit board
+
+   One self-contained file: canvas 2D, vanilla JS, no frameworks, no CDN,
+   no build step, works offline. Everything is drawn procedurally, so there
+   is nothing external to load.
+
+   Reads state from server.py on /state and never opens a microphone.
+   ========================================================================= */
+
+/* ---------------------------------------------------------------- params */
+const Q = new URLSearchParams(location.search);
+const MOCK_STATE   = Q.get("mockstate");                    // simulate locally
+const SHOT_STATE   = Q.get("shot");                         // freeze harness
+const SHOT_T       = Q.has("t") ? parseFloat(Q.get("t")) : 0;
+const FLY_FREEZE   = Q.get("fly") === "1";                  // freeze mid-flythrough
+const FLY_SEED     = Q.has("flyseed") ? parseInt(Q.get("flyseed"), 10) : 7;
+const FROZEN       = !!SHOT_STATE || FLY_FREEZE;
+const BOARD_SEED   = Q.has("seed") ? parseInt(Q.get("seed"), 10) : 20260805;
+
+const WORLD_W = 1920, WORLD_H = 1080;
+const MARGIN  = 40;
+
+/* Palette: cyan / electric blue on near-black. */
+const COL = {
+  sub0:"#050a10", sub1:"#0b1a26",
+  traceDim:"rgba(46,104,138,0.60)",
+  traceMid:"rgba(90,180,220,0.30)",
+  pad:"#2c6e8e", via:"#7fd2ec",
+  comp:"#0b1a26", compEdge:"#1e4257",
+  silk:"rgba(150,205,230,0.30)",
+  packet:"#c9f8ff", hot:"#eaffff",
+  chipBody:"#07131d", chipEdge:"#2c6685", die:"#8fecff",
+  alert:"#ff2b36",
+};
+
+/* Energy curve: fast attack ~0.5 s, slower release ~1 s. Everything in the
+   scene rides this one shape, so no state change ever reads as a hard step. */
+const TAU_ATTACK = 0.22, TAU_RELEASE = 0.43, TAU_LEVEL = 0.04;
+
+/* Glow energy and motion energy are separate axes: "alive" and "fast" are
+   different things. Speaking is full glow at a calm cruise; thinking is full
+   speed at moderate glow. */
+const TARGETS = {
+  idle:      {glow:0.16, motion:0.20},
+  listening: {glow:0.46, motion:0.58},
+  thinking:  {glow:0.58, motion:1.00},
+  speaking:  {glow:1.00, motion:0.42},
+};
+
+/* --------------------------------------------------------------- helpers */
+const clamp=(v,a,b)=>v<a?a:v>b?b:v;
+const lerp=(a,b,t)=>a+(b-a)*t;
+const easeOutCubic=t=>1-Math.pow(1-t,3);
+const TAU=Math.PI*2;
+
+function mulberry32(a){return function(){a|=0;a=a+0x6D2B79F5|0;let t=Math.imul(a^a>>>15,1|a);
+  t=t+Math.imul(t^t>>>7,61|t)^t;return((t^t>>>14)>>>0)/4294967296;};}
+
+/* Exponential ease with different rise and fall constants. */
+function ease(cur,target,dt){
+  const tau=target>cur?TAU_ATTACK:TAU_RELEASE;
+  return cur+(target-cur)*(1-Math.exp(-dt/tau));
+}
+
+/* ------------------------------------------------------------ the canvas */
+const canvas=document.getElementById("c");
+const g=canvas.getContext("2d",{alpha:false});
+const elTag=document.getElementById("tag");
+const elFps=document.getElementById("fps");
+const elHint=document.getElementById("hint");
+
+let W=0,H=0,DPR=1,baseScale=1;
+let baked=null,bakedCtx=null;      // the still board, blitted per frame
+let glowSprite=null,noiseTile=null,noisePattern=null;
+
+function computeDPR(){
+  // Capping this is the difference between 60fps and a slideshow on a big
+  // display.
+  return Math.min(window.devicePixelRatio||1, 1.25);
+}
+
+/* ------------------------------------------------------------- the world */
+const DIRS=[[1,0],[1,1],[0,1],[-1,1],[-1,0],[-1,-1],[0,-1],[1,-1]];
+let board=null;
+
+function buildBoard(seed){
+  const rnd=mulberry32(seed);
+  const cx=WORLD_W/2, cy=WORLD_H/2;
+  const chipW=360, chipH=360;
+  const chip={x:cx-chipW/2,y:cy-chipH/2,w:chipW,h:chipH,cx:cx,cy:cy,
+              die:{x:cx-118,y:cy-118,w:236,h:236}};
+
+  /* Pins fanning out of all four sides. */
+  const pins=[], perSide=17;
+  for(let side=0;side<4;side++){
+    for(let i=0;i<perSide;i++){
+      const f=(i+0.5)/perSide;
+      let p,dirIdx;
+      if(side===0){p={x:chip.x+chip.w*f,y:chip.y};dirIdx=6;}
+      else if(side===1){p={x:chip.x+chip.w,y:chip.y+chip.h*f};dirIdx=0;}
+      else if(side===2){p={x:chip.x+chip.w*f,y:chip.y+chip.h};dirIdx=2;}
+      else {p={x:chip.x,y:chip.y+chip.h*f};dirIdx=4;}
+      pins.push({x:p.x,y:p.y,dir:dirIdx,side:side});
+    }
+  }
+
+  /* Route a trace outward from a start point, 45-degree constrained, the way
+     a real autorouter fans a package out to the board edge. */
+  function route(start,dirIdx,minSteps){
+    const pts=[{x:start.x,y:start.y}];
+    let p={x:start.x,y:start.y}, d=dirIdx;
+    const base=dirIdx;
+    // escape stub first, so traces leave the pin cleanly
+    {
+      const v=DIRS[d], inv=(v[0]&&v[1])?Math.SQRT1_2:1, len=26+rnd()*26;
+      p={x:p.x+v[0]*inv*len,y:p.y+v[1]*inv*len};
+      pts.push({x:Math.round(p.x),y:Math.round(p.y)});
+    }
+    for(let step=0;step<12;step++){
+      if(step>=minSteps &&
+         (p.x<MARGIN*2||p.x>WORLD_W-MARGIN*2||p.y<MARGIN*2||p.y>WORLD_H-MARGIN*2)) break;
+      const r=rnd();
+      const turn=r<0.26?-1:r<0.52?1:0;
+      const nd=(d+turn+8)%8;
+      let diff=((nd-base+12)%8); if(diff>4) diff-=8;
+      if(Math.abs(diff)<=2) d=nd;                 // never fold back on itself
+      const v=DIRS[d], inv=(v[0]&&v[1])?Math.SQRT1_2:1;
+      const len=46+rnd()*160;
+      p={x:p.x+v[0]*inv*len,y:p.y+v[1]*inv*len};
+      p.x=clamp(Math.round(p.x),MARGIN,WORLD_W-MARGIN);
+      p.y=clamp(Math.round(p.y),MARGIN,WORLD_H-MARGIN);
+      const last=pts[pts.length-1];
+      if(Math.hypot(p.x-last.x,p.y-last.y)>4) pts.push({x:p.x,y:p.y});
+      if(p.x<=MARGIN||p.x>=WORLD_W-MARGIN||p.y<=MARGIN||p.y>=WORLD_H-MARGIN) break;
+    }
+    return pts;
+  }
+
+  function finish(pts,kind){
+    const cum=[0]; let len=0;
+    let x0=1e9,y0=1e9,x1=-1e9,y1=-1e9;
+    for(let i=0;i<pts.length;i++){
+      const p=pts[i];
+      x0=Math.min(x0,p.x);y0=Math.min(y0,p.y);x1=Math.max(x1,p.x);y1=Math.max(y1,p.y);
+      if(i>0){len+=Math.hypot(p.x-pts[i-1].x,p.y-pts[i-1].y);cum.push(len);}
+    }
+    return {pts,cum,len,kind,bb:{x0,y0,x1,y1},w:kind==="bus"?3.0:2.0};
+  }
+
+  const traces=[];
+  for(const pin of pins) traces.push(finish(route(pin,pin.dir,3),"pin"));
+  // A few fat bus runs for the long "trace run" camera shots to follow.
+  for(let i=0;i<10;i++){
+    const side=i%4, f=0.12+rnd()*0.76;
+    let s,d;
+    if(side===0){s={x:WORLD_W*f,y:MARGIN};d=2;}
+    else if(side===1){s={x:WORLD_W-MARGIN,y:WORLD_H*f};d=4;}
+    else if(side===2){s={x:WORLD_W*f,y:WORLD_H-MARGIN};d=6;}
+    else {s={x:MARGIN,y:WORLD_H*f};d=0;}
+    traces.push(finish(route(s,d,6),"bus"));
+  }
+
+  /* Vias at corners, pads at the outer ends. */
+  const vias=[],pads=[];
+  for(const t of traces){
+    for(let i=1;i<t.pts.length-1;i++) if(rnd()<0.34) vias.push({x:t.pts[i].x,y:t.pts[i].y,r:3.6+rnd()*2});
+    const e=t.pts[t.pts.length-1];
+    pads.push({x:e.x,y:e.y,r:5+rnd()*3.5});
+  }
+
+  /* SMD components straddling a segment, plus free-standing clusters. */
+  const comps=[];
+  const kinds=["R","C","L","D","U"];
+  for(const t of traces){
+    if(rnd()>0.55) continue;
+    const i=1+Math.floor(rnd()*Math.max(1,t.pts.length-2));
+    const a=t.pts[i-1],b=t.pts[i]; if(!b) continue;
+    const mx=(a.x+b.x)/2,my=(a.y+b.y)/2,ang=Math.atan2(b.y-a.y,b.x-a.x);
+    if(Math.hypot(mx-chip.cx,my-chip.cy)<chipW*0.75) continue;
+    const k=kinds[Math.floor(rnd()*3)];
+    comps.push({x:mx,y:my,a:ang,w:20+rnd()*18,h:9+rnd()*5,k:k,
+                n:k+(2+Math.floor(rnd()*90))});
+  }
+  const clusters=[];
+  for(let c=0;c<8;c++){
+    const ang=rnd()*TAU, rad=330+rnd()*430;
+    const ccx=clamp(chip.cx+Math.cos(ang)*rad,140,WORLD_W-140);
+    const ccy=clamp(chip.cy+Math.sin(ang)*rad*0.72,120,WORLD_H-120);
+    clusters.push({x:ccx,y:ccy});
+    const n=5+Math.floor(rnd()*6);
+    for(let i=0;i<n;i++){
+      const k=kinds[Math.floor(rnd()*kinds.length)];
+      comps.push({x:ccx+(rnd()-0.5)*150,y:ccy+(rnd()-0.5)*110,
+                  a:(rnd()<0.5?0:Math.PI/2)+(rnd()-0.5)*0.12,
+                  w:18+rnd()*26,h:9+rnd()*9,k:k,n:k+(2+Math.floor(rnd()*90))});
+    }
+  }
+
+  /* Edge connector: the vertical descent shot needs something to descend. */
+  const headers=[];
+  for(let side=0;side<2;side++){
+    const x=side===0?86:WORLD_W-86;
+    const fingers=[];
+    for(let i=0;i<22;i++) fingers.push({x:x-16,y:150+i*36,w:32,h:22});
+    headers.push({x:x,y0:150,y1:150+21*36+22,fingers:fingers,side:side});
+  }
+
+  return {chip,pins,traces,vias,pads,comps,clusters,headers};
+}
+
+/* -------------------------------------------------- polyline arc lookup */
+function pointAt(t,s){
+  s=clamp(s,0,t.len);
+  const cum=t.cum;
+  let lo=0,hi=cum.length-1;
+  while(lo<hi-1){const mid=(lo+hi)>>1;if(cum[mid]<=s)lo=mid;else hi=mid;}
+  const a=t.pts[lo],b=t.pts[lo+1]||a;
+  const seg=Math.max(1e-6,cum[lo+1]-cum[lo]);
+  const f=clamp((s-cum[lo])/seg,0,1);
+  return {x:lerp(a.x,b.x,f),y:lerp(a.y,b.y,f)};
+}
+
+/* ------------------------------------------------------------- baked art */
+function bakeSprites(){
+  // Additive glow sprite. Blitting this beats shadowBlur by a mile when there
+  // are a couple of hundred packets on screen.
+  glowSprite=document.createElement("canvas");
+  glowSprite.width=glowSprite.height=64;
+  const s=glowSprite.getContext("2d");
+  const grd=s.createRadialGradient(32,32,0,32,32,32);
+  grd.addColorStop(0,"rgba(210,250,255,1)");
+  grd.addColorStop(0.25,"rgba(120,225,255,0.55)");
+  grd.addColorStop(1,"rgba(60,180,235,0)");
+  s.fillStyle=grd;s.fillRect(0,0,64,64);
+
+  // Soldermask texture, tiled in world space.
+  noiseTile=document.createElement("canvas");
+  noiseTile.width=noiseTile.height=128;
+  const n=noiseTile.getContext("2d");
+  const img=n.createImageData(128,128);
+  const rnd=mulberry32(99);
+  for(let i=0;i<img.data.length;i+=4){
+    const v=rnd()*22;
+    img.data[i]=6+v*0.35;img.data[i+1]=16+v*0.8;img.data[i+2]=26+v;
+    img.data[i+3]=255;
+  }
+  n.putImageData(img,0,0);
+  n.strokeStyle="rgba(255,255,255,0.014)";n.lineWidth=1;
+  for(let i=0;i<128;i+=8){n.beginPath();n.moveTo(0,i);n.lineTo(128,i);n.stroke();}
+  noisePattern=g.createPattern(noiseTile,"repeat");
+}
+
+/* Draw the still world. Used two ways: baked once into an offscreen canvas
+   for the normal view, and re-run live through the camera transform during a
+   flythrough so close-ups stay infinitely crisp. */
+function drawBase(x,view,zoom){
+  const b=board;
+  // substrate
+  x.fillStyle=noisePattern||COL.sub0;
+  x.save();
+  x.fillRect(-200,-200,WORLD_W+400,WORLD_H+400);
+  x.restore();
+  const halo=x.createRadialGradient(b.chip.cx,b.chip.cy,40,b.chip.cx,b.chip.cy,900);
+  halo.addColorStop(0,"rgba(30,120,165,0.20)");
+  halo.addColorStop(1,"rgba(4,10,16,0)");
+  x.fillStyle=halo;x.fillRect(0,0,WORLD_W,WORLD_H);
+
+  const vis=t=>!view||(t.bb.x1>=view.x0&&t.bb.x0<=view.x1&&
+                       t.bb.y1>=view.y0&&t.bb.y0<=view.y1);
+  const inView=(px,py,pad)=>!view||(px>=view.x0-pad&&px<=view.x1+pad&&
+                                    py>=view.y0-pad&&py<=view.y1+pad);
+
+  // headers
+  x.fillStyle="#123244";
+  for(const hd of b.headers) for(const f of hd.fingers){
+    if(!inView(f.x,f.y,60)) continue;
+    x.fillRect(f.x,f.y,f.w,f.h);
+    x.fillStyle="#1d4d63";x.fillRect(f.x,f.y,f.w,3);x.fillStyle="#123244";
+  }
+
+  // traces, dim layer
+  x.lineCap="round";x.lineJoin="round";
+  x.strokeStyle=COL.traceDim;
+  for(const t of b.traces){
+    if(!vis(t)) continue;
+    x.lineWidth=t.w;
+    x.beginPath();x.moveTo(t.pts[0].x,t.pts[0].y);
+    for(let i=1;i<t.pts.length;i++) x.lineTo(t.pts[i].x,t.pts[i].y);
+    x.stroke();
+  }
+
+  // pads and vias
+  x.fillStyle=COL.pad;
+  for(const p of b.pads){ if(!inView(p.x,p.y,20)) continue;
+    x.beginPath();x.arc(p.x,p.y,p.r,0,TAU);x.fill(); }
+  for(const v of b.vias){ if(!inView(v.x,v.y,20)) continue;
+    x.beginPath();x.arc(v.x,v.y,v.r,0,TAU);
+    x.fillStyle="#0a1a26";x.fill();
+    x.strokeStyle=COL.via;x.lineWidth=1.2;x.stroke(); }
+
+  // components
+  for(const c of b.comps){
+    if(!inView(c.x,c.y,80)) continue;
+    x.save();x.translate(c.x,c.y);x.rotate(c.a);
+    x.fillStyle=COL.comp;x.strokeStyle=COL.compEdge;x.lineWidth=1.1;
+    x.fillRect(-c.w/2,-c.h/2,c.w,c.h);x.strokeRect(-c.w/2,-c.h/2,c.w,c.h);
+    x.fillStyle="#b8895a";
+    x.fillRect(-c.w/2-3,-c.h/2,4,c.h);x.fillRect(c.w/2-1,-c.h/2,4,c.h);
+    // Silkscreen only when the lens is close enough to read it.
+    if(zoom>1.9){
+      x.fillStyle=COL.silk;x.font="7px ui-monospace,monospace";
+      x.textAlign="center";x.fillText(c.n,0,-c.h/2-4);
+    }
+    x.restore();
+  }
+
+  // chip package (the die itself is animated, so it is not baked)
+  const c=b.chip;
+  x.fillStyle="#0a1725";
+  for(const pin of b.pins){
+    const v=DIRS[pin.dir],inv=(v[0]&&v[1])?Math.SQRT1_2:1;
+    x.fillRect(pin.x-3+v[0]*inv*4,pin.y-3+v[1]*inv*4,7,7);
+  }
+  x.fillStyle=COL.chipBody;
+  x.strokeStyle=COL.chipEdge;x.lineWidth=2.4;
+  roundRect(x,c.x,c.y,c.w,c.h,10);x.fill();x.stroke();
+  x.strokeStyle="rgba(90,180,220,0.22)";x.lineWidth=1.2;
+  roundRect(x,c.x+12,c.y+12,c.w-24,c.h-24,7);x.stroke();
+  x.beginPath();x.arc(c.x+26,c.y+26,5,0,TAU);
+  x.fillStyle="#1d4d63";x.fill();
+  if(zoom>1.25){
+    x.fillStyle="rgba(170,225,245,0.45)";
+    x.font="13px ui-monospace,monospace";x.textAlign="center";
+    x.fillText("U1 · CORTEX",c.cx,c.y+c.h-16);
+  }
+}
+
+function roundRect(x,px,py,w,h,r){
+  x.beginPath();
+  x.moveTo(px+r,py);x.lineTo(px+w-r,py);x.quadraticCurveTo(px+w,py,px+w,py+r);
+  x.lineTo(px+w,py+h-r);x.quadraticCurveTo(px+w,py+h,px+w-r,py+h);
+  x.lineTo(px+r,py+h);x.quadraticCurveTo(px,py+h,px,py+h-r);
+  x.lineTo(px,py+r);x.quadraticCurveTo(px,py,px+r,py);x.closePath();
+}
+
+function bakeBoard(){
+  baked=document.createElement("canvas");
+  baked.width=Math.max(1,Math.floor(W*DPR));
+  baked.height=Math.max(1,Math.floor(H*DPR));
+  bakedCtx=baked.getContext("2d");
+  bakedCtx.setTransform(DPR,0,0,DPR,0,0);
+  bakedCtx.translate(W/2,H/2);
+  bakedCtx.scale(baseScale,baseScale);
+  bakedCtx.translate(-WORLD_W/2,-WORLD_H/2);
+  drawBase(bakedCtx,null,1);
+}
+
+/* ------------------------------------------------------------ simulation */
+let simRnd=mulberry32(1234);
+const packets=[];
+const rings=[];       // shockwaves and intake rings
+let simTime=0;
+
+const S={
+  state:"idle", prevState:"idle", level:0, levelSmooth:0, alert:false,
+  glowE:0, motionE:0, alertE:0, live:false, samples:null,
+  lastGood:0, stale:false, spawnAcc:0, peakCd:0, levelAvg:0,
+  scan:0, arc:0,
+  // Per-state weights, eased on the same curve. These cross-fade the
+  // state-specific visuals (compute grid, intake rings, the voice) so one
+  // state's treatment never bleeds into another's.
+  w:{idle:0,listening:0,thinking:0,speaking:0},
+};
+const STATE_KEYS=["idle","listening","thinking","speaking"];
+
+function resetSim(){
+  simRnd=mulberry32(4242);
+  packets.length=0;rings.length=0;simTime=0;
+  S.glowE=0;S.motionE=0;S.alertE=0;S.levelSmooth=0;S.levelAvg=0;
+  S.spawnAcc=0;S.peakCd=0;S.scan=0;S.arc=0;
+  for(const k of STATE_KEYS) S.w[k]=0;
+}
+
+function spawnPacket(dirOut,speedMul,fromChip,alphaMul){
+  const b=board;
+  const t=b.traces[Math.floor(simRnd()*b.traces.length)];
+  if(!t) return;
+  const out=dirOut===undefined?(simRnd()<0.5?1:-1):(dirOut?1:-1);
+  // s runs from the chip end (0) outward, so +1 is "away from the chip".
+  const s=out>0?(fromChip?0:simRnd()*t.len*0.4):t.len-simRnd()*t.len*0.25;
+  packets.push({t:t,s:s,dir:out,
+                spd:(120+simRnd()*130)*speedMul,
+                w:t.kind==="bus"?2.6:1.9,
+                a:clamp((0.55+simRnd()*0.45)*(alphaMul||1),0,1.2), life:0});
+}
+
+function simulate(dt){
+  simTime+=dt;
+
+  // one continuously eased curve, two axes
+  const tgt=TARGETS[S.state]||TARGETS.idle;
+  S.glowE=ease(S.glowE,tgt.glow,dt);
+  S.motionE=ease(S.motionE,tgt.motion,dt);
+  S.alertE=ease(S.alertE,S.alert?1:0,dt);
+  for(const k of STATE_KEYS) S.w[k]=ease(S.w[k],S.state===k?1:0,dt);
+  S.levelSmooth+=(S.level-S.levelSmooth)*(1-Math.exp(-dt/TAU_LEVEL));
+  S.levelAvg+=(S.levelSmooth-S.levelAvg)*(1-Math.exp(-dt/0.5));
+
+  S.scan+=dt*(0.7+S.motionE*2.4);
+  S.arc+=dt*(0.5+S.motionE*3.2);
+
+  /* Packet population by state. Direction is the story:
+     listening flows inward, speaking fires outward, thinking is both. */
+  const st=S.state;
+  let rate, speedMul=0.55+S.motionE*1.9;
+  if(st==="idle") rate=2.5;
+  else if(st==="listening") rate=42;
+  else if(st==="thinking") rate=62;
+  else rate=16;                       // speaking's traffic comes from bursts
+  S.spawnAcc+=dt*rate;
+  while(S.spawnAcc>=1){
+    S.spawnAcc-=1;
+    // Listening runs bright and inbound: it has to read as "I hear you" from
+    // across the room, not as a slightly busier idle.
+    if(st==="listening") spawnPacket(false,speedMul*1.15,false,1.35);
+    else if(st==="thinking") spawnPacket(simRnd()<0.5,speedMul,false);
+    else if(st==="speaking") spawnPacket(true,speedMul,true);
+    else spawnPacket(simRnd()<0.5,speedMul*0.6,false);
+  }
+
+  /* Speaking peaks fire a burst out of the pins and a shockwave off the die. */
+  S.peakCd-=dt;
+  if(st==="speaking"){
+    const excess=S.levelSmooth-S.levelAvg;
+    if(S.peakCd<=0&&excess>0.055&&S.levelSmooth>0.20){
+      S.peakCd=0.09;
+      const n=6+Math.floor(S.levelSmooth*16);
+      for(let i=0;i<n;i++) spawnPacket(true,speedMul*(1+S.levelSmooth),true);
+      if(S.levelSmooth>0.42) rings.push({r:120,v:520,a:0.55*S.levelSmooth,kind:"out"});
+    }
+  }
+  if(st==="listening"){
+    if(simTime%0.42<dt) rings.push({r:540,v:-340,a:0.66,kind:"in"});
+  }
+
+  for(let i=packets.length-1;i>=0;i--){
+    const p=packets[i];
+    p.s+=p.dir*p.spd*dt*(0.5+S.motionE*1.1);
+    p.life+=dt;
+    if(p.s<-40||p.s>p.t.len+40||p.life>14) packets.splice(i,1);
+  }
+  // hard cap, cheap insurance against a long thinking run piling up
+  if(packets.length>620) packets.splice(0,packets.length-620);
+
+  for(let i=rings.length-1;i>=0;i--){
+    const r=rings[i];
+    r.r+=r.v*dt; r.a-=dt*(r.kind==="in"?0.55:0.85);
+    if(r.a<=0||r.r<40||r.r>1400) rings.splice(i,1);
+  }
+}
+
+/* ------------------------------------------------------------ the camera */
+const cam={x:WORLD_W/2,y:WORLD_H/2,zoom:1,tilt:0};
+
+const RUN_MS=30000, FINALE_MS=5200;
+const SPEED_SW=0.30;      // screen-widths per second: ONE apparent speed
+const ZOOM_W=0.60;        // how much a zoom change counts as travel
+const MIN_DUR=2.4, MAX_DUR=6.2;
+const TILT_ROT=0.055, TILT_SHEAR=0.20, TILT_SQUASH=0.13;
+
+const fly={active:false,t:0,deck:[],idx:0,shotT:0,bailing:false,bailT:0,
+           from:null,seed:1};
+
+function camDurationFor(a,b){
+  const zAvg=(a.zoom+b.zoom)/2;
+  const px=Math.hypot(b.x-a.x,b.y-a.y)*baseScale*zAvg;
+  const screens=px/Math.max(1,W);
+  const zoomTravel=Math.abs(Math.log(b.zoom/a.zoom))*ZOOM_W;
+  return clamp((screens+zoomTravel)/SPEED_SW,MIN_DUR,MAX_DUR);
+}
+
+/* The shot pool, built around this scene: a glide along a trace, a push into
+   the chip, a corner-to-corner diagonal, a drift across a component cluster,
+   and a descent down the edge connector. */
+function dealShot(rnd,lastSubject,forceKind){
+  const b=board;
+  const kinds=forceKind?[forceKind]:["trace","chip","diag","cluster","edge"];
+  for(let attempt=0;attempt<24;attempt++){
+    const kind=kinds[Math.floor(rnd()*kinds.length)];
+    let subject,from,to;
+    if(kind==="chip"){
+      subject="chip";
+      const ang=rnd()*TAU, d=250+rnd()*160;
+      from={x:b.chip.cx+Math.cos(ang)*d,y:b.chip.cy+Math.sin(ang)*d*0.7,zoom:2.0+rnd()*0.6};
+      to  ={x:b.chip.cx+Math.cos(ang)*30,y:b.chip.cy+Math.sin(ang)*20,zoom:3.4+rnd()*1.0};
+    }else if(kind==="trace"){
+      const longs=b.traces.filter(t=>t.len>420);
+      const t=longs[Math.floor(rnd()*longs.length)]||b.traces[0];
+      subject="trace:"+b.traces.indexOf(t);
+      const rev=rnd()<0.5;
+      const s0=rev?t.len*0.88:t.len*0.12, s1=rev?t.len*0.12:t.len*0.88;
+      const p0=pointAt(t,s0),p1=pointAt(t,s1);
+      const z=2.6+rnd()*1.3;
+      from={x:p0.x,y:p0.y,zoom:z};to={x:p1.x,y:p1.y,zoom:z*(0.9+rnd()*0.25)};
+    }else if(kind==="diag"){
+      subject="diag";
+      const c=Math.floor(rnd()*4);
+      const pts=[{x:340,y:250},{x:WORLD_W-340,y:250},
+                 {x:WORLD_W-340,y:WORLD_H-250},{x:340,y:WORLD_H-250}];
+      const a=pts[c],z=1.5+rnd()*0.5;
+      from={x:a.x,y:a.y,zoom:z};
+      to={x:pts[(c+2)%4].x,y:pts[(c+2)%4].y,zoom:z*(0.92+rnd()*0.2)};
+    }else if(kind==="cluster"){
+      const cl=b.clusters[Math.floor(rnd()*b.clusters.length)];
+      subject="cluster:"+b.clusters.indexOf(cl);
+      const ang=rnd()*TAU, z=3.2+rnd()*1.4;
+      from={x:cl.x-Math.cos(ang)*150,y:cl.y-Math.sin(ang)*110,zoom:z};
+      to  ={x:cl.x+Math.cos(ang)*150,y:cl.y+Math.sin(ang)*110,zoom:z*(0.95+rnd()*0.2)};
+    }else{
+      const hd=b.headers[Math.floor(rnd()*b.headers.length)];
+      subject="edge:"+hd.side;
+      const down=rnd()<0.5, z=2.8+rnd()*0.9;
+      from={x:hd.x,y:down?hd.y0+60:hd.y1-60,zoom:z};
+      to  ={x:hd.x,y:down?hd.y1-60:hd.y0+60,zoom:z*(0.95+rnd()*0.15)};
+    }
+    // Never cut from a subject straight back to the same subject.
+    if(subject===lastSubject) continue;
+    return {kind,subject,from,to,dur:camDurationFor(from,to),ease:"linear"};
+  }
+  return null;
+}
+
+function dealFinale(rnd,lastSubject){
+  // The finale starts on a fresh subject -- never the one we were just on --
+  // and pulls back from it to the full wide board.
+  let start=null;
+  for(let i=0;i<30&&!start;i++){
+    const s=dealShot(rnd,lastSubject);
+    if(s&&s.subject!==lastSubject) start=s;
+  }
+  const from=start?start.from:{x:board.chip.cx,y:board.chip.cy,zoom:3.2};
+  return {kind:"finale",subject:start?start.subject:"chip",
+          from:from,to:{x:WORLD_W/2,y:WORLD_H/2,zoom:1},
+          dur:FINALE_MS/1000,ease:"out",finale:true};
+}
+
+function buildDeck(seed){
+  const rnd=mulberry32(seed);
+  const deck=[];let total=0,last=null;
+  while(total<(RUN_MS-FINALE_MS)/1000){
+    const s=dealShot(rnd,last);
+    if(!s) break;
+    deck.push(s);total+=s.dur;last=s.subject;
+  }
+  deck.push(dealFinale(rnd,last));
+  return deck;
+}
+
+function startFly(seed){
+  fly.active=true;fly.t=0;fly.idx=0;fly.shotT=0;fly.bailing=false;fly.bailT=0;
+  fly.seed=seed===undefined?(Math.random()*1e9)|0:seed;
+  fly.deck=buildDeck(fly.seed);
+  document.body.classList.add("flying");
+  elTag.classList.add("hidden");elFps.classList.add("hidden");elHint.classList.add("hidden");
+}
+
+function endFly(){
+  fly.active=false;
+  cam.x=WORLD_W/2;cam.y=WORLD_H/2;cam.zoom=1;cam.tilt=0;
+  elTag.classList.remove("hidden");elHint.classList.remove("hidden");
+  if(showFps) elFps.classList.remove("hidden");
+}
+
+function updateFly(dt){
+  if(fly.bailing){
+    // Bail out cleanly: a short glide back to the normal view.
+    fly.bailT+=dt;
+    const u=clamp(fly.bailT/0.45,0,1),e=easeOutCubic(u);
+    cam.x=lerp(fly.from.x,WORLD_W/2,e);
+    cam.y=lerp(fly.from.y,WORLD_H/2,e);
+    cam.zoom=Math.exp(lerp(Math.log(fly.from.zoom),0,e));
+    cam.tilt=fly.from.tilt*(1-e);
+    if(u>=1) endFly();
+    return;
+  }
+  fly.t+=dt;fly.shotT+=dt;
+  let sh=fly.deck[fly.idx];
+  while(sh&&fly.shotT>=sh.dur&&fly.idx<fly.deck.length-1){
+    fly.shotT-=sh.dur;fly.idx++;sh=fly.deck[fly.idx];
+  }
+  if(!sh){endFly();return;}
+  const u=clamp(fly.shotT/sh.dur,0,1);
+  // Constant speed inside every shot; the ONLY deceleration in the run is the
+  // finale easing in to land. Per-shot ease-in/out reads as the camera pausing
+  // at each cut, which kills it.
+  const e=sh.ease==="out"?easeOutCubic(u):u;
+  cam.x=lerp(sh.from.x,sh.to.x,e);
+  cam.y=lerp(sh.from.y,sh.to.y,e);
+  cam.zoom=Math.exp(lerp(Math.log(sh.from.zoom),Math.log(sh.to.zoom),e));
+  // Arrive already tilted on the first frame; flatten in sync with the
+  // pull-back so the landing and the un-tilt are one motion.
+  cam.tilt=sh.finale?(1-e):1;
+  if(sh.finale&&u>=1) endFly();
+}
+
+function applyCamera(x){
+  x.setTransform(DPR,0,0,DPR,0,0);
+  x.translate(W/2,H/2);
+  if(cam.tilt>0.001){
+    x.rotate(TILT_ROT*cam.tilt);
+    x.transform(1,0,-TILT_SHEAR*cam.tilt,1-TILT_SQUASH*cam.tilt,0,0);
+  }
+  const z=baseScale*cam.zoom;
+  x.scale(z,z);
+  x.translate(-cam.x,-cam.y);
+  return z;
+}
+
+function viewRect(x){
+  // Inverse-map the screen corners so we can cull to what is actually in frame.
+  const m=x.getTransform().invertSelf();
+  const cs=[[0,0],[W*DPR,0],[0,H*DPR],[W*DPR,H*DPR]];
+  let x0=1e9,y0=1e9,x1=-1e9,y1=-1e9;
+  for(const c of cs){
+    const px=m.a*c[0]+m.c*c[1]+m.e, py=m.b*c[0]+m.d*c[1]+m.f;
+    x0=Math.min(x0,px);y0=Math.min(y0,py);x1=Math.max(x1,px);y1=Math.max(y1,py);
+  }
+  return {x0,y0,x1,y1};
+}
+
+/* -------------------------------------------------------------- rendering */
+let showFps=false,fps=0,fpsAcc=0,fpsN=0;
+let introT=0,introDone=false;
+
+function drawPackets(x,view,glowScale){
+  x.globalCompositeOperation="lighter";
+  const boost=0.45+S.glowE*0.9;
+  for(const p of packets){
+    const t=p.t;
+    if(view&&(t.bb.x1<view.x0||t.bb.x0>view.x1||t.bb.y1<view.y0||t.bb.y0>view.y1)) continue;
+    const head=pointAt(t,p.s);
+    if(view&&(head.x<view.x0-80||head.x>view.x1+80||
+              head.y<view.y0-80||head.y>view.y1+80)) continue;
+    // tail, three chunks of decreasing alpha
+    const tail=42+p.spd*0.09;
+    for(let k=0;k<3;k++){
+      const s0=p.s-p.dir*tail*(k+1)/3, s1=p.s-p.dir*tail*k/3;
+      const a=p.a*boost*(1-k/3)*0.5;
+      if(a<=0.01) continue;
+      const q0=pointAt(t,Math.min(s0,s1)),q1=pointAt(t,Math.max(s0,s1));
+      x.strokeStyle="rgba(150,235,255,"+a.toFixed(3)+")";
+      x.lineWidth=p.w*(1-k*0.22);
+      x.beginPath();x.moveTo(q0.x,q0.y);x.lineTo(q1.x,q1.y);x.stroke();
+    }
+    // The glow sprite lives in world space, so divide by the camera zoom to
+    // keep it the same apparent size at any focal length. Without this,
+    // close-ups turn every packet into a soft blob.
+    const r=(5.5+p.w*1.6)*(0.8+S.glowE*0.5)*glowScale;
+    x.globalAlpha=clamp(p.a*boost,0,1);
+    x.drawImage(glowSprite,head.x-r,head.y-r,r*2,r*2);
+    x.globalAlpha=1;
+  }
+  x.globalCompositeOperation="source-over";
+}
+
+function drawChip(x,zoom){
+  const b=board,c=b.chip,d=c.die;
+  const lvl=S.levelSmooth;
+  // Weight, not a boolean. A binary "is speaking" switch here would step the
+  // die's glow and pulse the instant speech ends, which is exactly the jump
+  // cut the eased curve exists to prevent.
+  const spk=S.w.speaking;
+
+  // die substrate
+  x.fillStyle="#061019";
+  roundRect(x,d.x,d.y,d.w,d.h,6);x.fill();
+
+  // thinking: a compute grid scanning across the die -- the processing
+  // indicator, in the language of the scene
+  if(S.w.thinking>0.02){
+    const N=8,cw=d.w/N,ch=d.h/N;
+    for(let i=0;i<N;i++)for(let j=0;j<N;j++){
+      const h=((i*7+j*13)%17)/17;
+      const phase=(S.scan*0.9+h*1.6+i*0.06)%1;
+      const on=phase<0.34?1-phase/0.34:0;
+      if(on<=0.02) continue;
+      const a=on*0.55*S.w.thinking;
+      x.fillStyle="rgba(120,225,255,"+a.toFixed(3)+")";
+      x.fillRect(d.x+i*cw+1.5,d.y+j*ch+1.5,cw-3,ch-3);
+    }
+  }
+
+  // speaking: the die IS the voice
+  const glow=S.glowE*(0.35+lvl*0.75*spk);
+  const pulse=1+lvl*0.075*spk+Math.sin(simTime*1.05)*0.012*S.glowE;
+  x.save();
+  x.translate(c.cx,c.cy);x.scale(pulse,pulse);x.translate(-c.cx,-c.cy);
+
+  x.globalCompositeOperation="lighter";
+  const r=Math.max(d.w,d.h)*(0.62+glow*1.15);
+  x.globalAlpha=clamp(0.30+glow*0.85,0,1);
+  x.drawImage(glowSprite,c.cx-r,c.cy-r,r*2,r*2);
+  x.globalAlpha=1;
+  x.globalCompositeOperation="source-over";
+
+  // die face
+  const face=x.createLinearGradient(d.x,d.y,d.x+d.w,d.y+d.h);
+  face.addColorStop(0,"rgba(30,110,150,"+(0.25+glow*0.5).toFixed(3)+")");
+  face.addColorStop(1,"rgba(90,220,255,"+(0.14+glow*0.45).toFixed(3)+")");
+  x.fillStyle=face;roundRect(x,d.x,d.y,d.w,d.h,6);x.fill();
+
+  // Canvas shadows are NOT scaled by the transform, so scale the blur by the
+  // zoom or the rim light shrinks as the camera dives in.
+  x.shadowColor="rgba(130,235,255,"+(0.5*S.glowE).toFixed(3)+")";
+  x.shadowBlur=(10+glow*26)*zoom;
+  x.strokeStyle="rgba(160,240,255,"+(0.35+glow*0.55).toFixed(3)+")";
+  x.lineWidth=2/Math.max(0.6,1);
+  roundRect(x,d.x,d.y,d.w,d.h,6);x.stroke();
+  x.shadowBlur=0;
+
+  // the oscilloscope: real samples off the bus when we have them
+  // Fade the scope out with the voice: a flat line across the die during a
+  // pause reads as a broken instrument, not silence.
+  const scopeA=spk*clamp(lvl*6,0,1);
+  if(scopeA>0.02){
+    const sm=S.samples;
+    const n=sm&&sm.length?sm.length:64;
+    // Real bus samples when we have them; otherwise a jagged synthetic
+    // envelope, because a clean sine reads as a spring, not a voice.
+    const mag=i=>sm&&sm.length?clamp(Math.abs(sm[i])/6000,0,1)
+      :clamp((0.22+0.78*Math.abs(Math.sin(i*1.71+simTime*3.1)
+                                *Math.sin(i*0.43+simTime*1.27)
+                                *Math.cos(i*0.17+simTime*0.7)))*lvl,0,1);
+    x.beginPath();
+    for(let i=0;i<n;i++){
+      const px=d.x+8+(d.w-16)*(i/(n-1));
+      const py=c.cy-mag(i)*(d.h*0.40)*(0.35+lvl*0.9);
+      i?x.lineTo(px,py):x.moveTo(px,py);
+    }
+    for(let i=n-1;i>=0;i--){
+      const px=d.x+8+(d.w-16)*(i/(n-1));
+      x.lineTo(px,c.cy+mag(i)*(d.h*0.40)*(0.35+lvl*0.9));
+    }
+    x.closePath();
+    x.fillStyle="rgba(180,245,255,"+((0.10+lvl*0.30)*scopeA).toFixed(3)+")";x.fill();
+    x.strokeStyle="rgba(210,250,255,"+((0.35+lvl*0.55)*scopeA).toFixed(3)+")";
+    x.lineWidth=1.6;x.stroke();
+  }
+  x.restore();
+
+  // rings: intake (listening) and shockwaves (speaking peaks)
+  x.globalCompositeOperation="lighter";
+  for(const rg of rings){
+    x.strokeStyle="rgba(150,235,255,"+clamp(rg.a,0,1).toFixed(3)+")";
+    x.lineWidth=rg.kind==="in"?2.2:3.2;
+    x.beginPath();x.arc(c.cx,c.cy,rg.r,0,TAU);x.stroke();
+  }
+  x.globalCompositeOperation="source-over";
+
+  // thinking: progress arc around the package
+  if(S.w.thinking>0.02){
+    const a0=S.arc%TAU,rr=c.w*0.62;
+    x.strokeStyle="rgba(130,230,255,"+(0.55*S.w.thinking).toFixed(3)+")";
+    x.lineWidth=3;x.lineCap="round";
+    x.beginPath();x.arc(c.cx,c.cy,rr,a0,a0+1.5);x.stroke();
+    x.beginPath();x.arc(c.cx,c.cy,rr,a0+Math.PI,a0+Math.PI+0.9);x.stroke();
+  }
+}
+
+/* Screen-space only: grain, vignette, alert wash. Never in world space. */
+function drawScreenFx(x){
+  x.setTransform(1,0,0,1,0,0);
+  const w=canvas.width,h=canvas.height;
+
+  if(S.alertE>0.01){
+    // Recolour the whole board red without touching any of the drawing above.
+    x.save();
+    x.globalCompositeOperation="color";
+    x.globalAlpha=clamp(S.alertE*0.9,0,1);
+    x.fillStyle=COL.alert;x.fillRect(0,0,w,h);
+    x.restore();
+    const pulse=0.5+0.5*Math.sin(simTime*5.2);
+    const bleed=x.createRadialGradient(w/2,h/2,Math.min(w,h)*0.20,
+                                       w/2,h/2,Math.max(w,h)*0.75);
+    bleed.addColorStop(0,"rgba(255,20,30,0)");
+    bleed.addColorStop(1,"rgba(255,20,30,"+(0.30+0.28*pulse).toFixed(3)+")");
+    x.save();x.globalAlpha=S.alertE;x.fillStyle=bleed;x.fillRect(0,0,w,h);x.restore();
+  }
+
+  const vig=x.createRadialGradient(w/2,h/2,Math.min(w,h)*0.32,
+                                   w/2,h/2,Math.max(w,h)*0.78);
+  vig.addColorStop(0,"rgba(0,0,0,0)");
+  vig.addColorStop(1,"rgba(0,0,0,0.62)");
+  x.fillStyle=vig;x.fillRect(0,0,w,h);
+
+  if(noiseTile){
+    x.save();
+    x.globalAlpha=0.035;
+    x.globalCompositeOperation="overlay";
+    const ox=(Math.floor(simTime*24)%7)*17, oy=(Math.floor(simTime*24)%11)*13;
+    const pat=x.createPattern(noiseTile,"repeat");
+    x.translate(-ox,-oy);
+    x.fillStyle=pat;x.fillRect(0,0,w+128,h+128);
+    x.restore();
+  }
+}
+
+function render(){
+  const flying=fly.active;
+  g.setTransform(1,0,0,1,0,0);
+  g.fillStyle="#04070c";g.fillRect(0,0,canvas.width,canvas.height);
+
+  let zoom=1,view=null;
+  if(flying){
+    // Re-render the world through the camera every frame instead of scaling a
+    // prebaked image: close-ups stay crisp, and culling keeps it cheap.
+    zoom=applyCamera(g);
+    view=viewRect(g);
+    drawBase(g,view,cam.zoom);
+  }else{
+    g.drawImage(baked,0,0);
+    g.setTransform(DPR,0,0,DPR,0,0);
+    g.translate(W/2,H/2);g.scale(baseScale,baseScale);g.translate(-WORLD_W/2,-WORLD_H/2);
+    zoom=baseScale;
+  }
+
+  // board-wide bloom, stronger the more glow energy there is
+  if(S.glowE>0.02){
+    g.globalCompositeOperation="lighter";
+    const b=board;
+    const r=1500*(0.45+S.glowE*0.55);
+    g.globalAlpha=clamp(0.08+S.glowE*0.22,0,1)*(0.5+S.levelSmooth*0.5);
+    g.drawImage(glowSprite,b.chip.cx-r,b.chip.cy-r,r*2,r*2);
+    g.globalAlpha=1;
+    g.globalCompositeOperation="source-over";
+  }
+
+  drawPackets(g,view,flying?1/cam.zoom:1);
+  drawChip(g,flying?cam.zoom*baseScale:baseScale);
+
+  if(!introDone) drawIntro(g);
+  drawScreenFx(g);
+}
+
+/* ----------------------------------------------------------- boot intro */
+function drawIntro(x){
+  const p=clamp(introT/2.6,0,1);
+  x.setTransform(1,0,0,1,0,0);
+  const w=canvas.width,h=canvas.height;
+  // black curtain retreating behind a power rail sweeping across the board
+  const railX=w*easeOutCubic(clamp(p/0.72,0,1));
+  x.fillStyle="rgba(3,6,10,"+(1-clamp((p-0.05)/0.5,0,1)*0.92).toFixed(3)+")";
+  x.fillRect(railX,0,w-railX,h);
+  if(p<0.78){
+    const gr=x.createLinearGradient(railX-90,0,railX+16,0);
+    gr.addColorStop(0,"rgba(120,230,255,0)");
+    gr.addColorStop(1,"rgba(190,245,255,0.85)");
+    x.fillStyle=gr;x.fillRect(railX-90,0,106,h);
+  }
+  if(p>0.55){
+    const f=clamp((p-0.55)/0.2,0,1);
+    x.globalCompositeOperation="lighter";
+    x.globalAlpha=(1-f)*0.9;
+    const r=Math.min(w,h)*0.42*f;
+    x.drawImage(glowSprite,w/2-r,h/2-r,r*2,r*2);
+    x.globalAlpha=1;x.globalCompositeOperation="source-over";
+  }
+  const a=clamp(1-Math.abs(p-0.5)*2.6,0,1);
+  if(a>0.02){
+    x.fillStyle="rgba(160,235,255,"+(a*0.75).toFixed(3)+")";
+    x.font=(12*DPR)+"px ui-monospace,monospace";
+    x.textAlign="left";
+    const lines=["POST … OK","BUS 8777 … LINK","U1 CORTEX … ONLINE"];
+    for(let i=0;i<lines.length;i++){
+      if(p>0.22+i*0.13) x.fillText(lines[i],28*DPR,(h-84*DPR)+i*16*DPR);
+    }
+  }
+}
+
+/* --------------------------------------------------------- state source */
+let pollTimer=null;
+
+function applyPayload(d){
+  S.state=d.state||"idle";
+  S.level=typeof d.level==="number"?d.level:0;
+  S.alert=!!d.alert;
+  S.live=!!d.live;
+  S.samples=d.samples||null;
+  S.lastGood=performance.now();
+  S.stale=false;
+}
+
+async function poll(){
+  try{
+    const r=await fetch("/state?samples=1",{cache:"no-store"});
+    if(!r.ok) throw new Error(r.status);
+    applyPayload(await r.json());
+  }catch(e){
+    // If /state stops answering or goes stale, ease back to idle on our own.
+    if(performance.now()-S.lastGood>2000){
+      S.stale=true;S.state="idle";S.level=0;S.alert=false;S.samples=null;
+    }
+  }
+}
+
+/* Local simulation for ?mockstate= and the freeze harness: never touches
+   /state at all. */
+function simulatedPayload(state,t){
+  let level=0;
+  if(state==="speaking"){
+    const s=t/1000;
+    const phrase=0.5+0.5*Math.sin(s*0.55);
+    const syll=0.5+0.5*Math.sin(s*9.3+Math.sin(s*3.1)*1.7);
+    const gap=(s%5.5)<4.6?1:0.05;
+    level=clamp((0.22+0.78*phrase*syll)*gap,0,1);
+  }
+  return {state:state==="alert"?"idle":state,level:level,
+          alert:state==="alert",live:state==="speaking",samples:null};
+}
+
+/* ---------------------------------------------------------------- layout */
+function resize(){
+  DPR=computeDPR();
+  W=window.innerWidth;H=window.innerHeight;
+  canvas.width=Math.max(1,Math.floor(W*DPR));
+  canvas.height=Math.max(1,Math.floor(H*DPR));
+  baseScale=Math.max(W/WORLD_W,H/WORLD_H);
+  bakeBoard();
+  // Headless Chrome fires a late initial resize that would otherwise clear the
+  // canvas after a synchronous freeze render, and the screenshot comes back
+  // black. So re-render the frozen frame here.
+  if(FROZEN) renderFrozen();
+}
+
+/* ---------------------------------------------------------- freeze harness */
+function renderFrozen(){
+  resetSim();
+  introDone=true;introT=99;
+  const step=1/60;
+  const total=Math.max(0,SHOT_T||0)/1000;
+
+  if(FLY_FREEZE){
+    startFly(FLY_SEED);
+    elTag.classList.add("hidden");elFps.classList.add("hidden");elHint.classList.add("hidden");
+    const d=simulatedPayload("speaking",0);
+    applyPayload(d);
+    for(let t=0;t<total;t+=step){
+      applyPayload(simulatedPayload("speaking",t*1000));
+      simulate(step);
+      updateFly(step);
+    }
+  }else{
+    for(let t=0;t<total;t+=step){
+      applyPayload(simulatedPayload(SHOT_STATE,t*1000));
+      simulate(step);
+    }
+    if(total===0) applyPayload(simulatedPayload(SHOT_STATE,0));
+    // Snap the eased curves to their targets so a t=0 shot is not a black
+    // frame of a scene that has not warmed up yet.
+    if(total<0.2){
+      const tgt=TARGETS[S.state]||TARGETS.idle;
+      S.glowE=tgt.glow;S.motionE=tgt.motion;S.alertE=S.alert?1:0;
+      S.levelSmooth=S.level;
+      for(const k of STATE_KEYS) S.w[k]=S.state===k?1:0;
+    }
+  }
+  elTag.innerHTML='<span class="dot"></span><b>'+(SHOT_STATE||"flythrough")+
+                  "</b> &nbsp;"+S.levelSmooth.toFixed(2)+(S.alert?" &nbsp;ALERT":"");
+  elTag.classList.toggle("alert",S.alert);
+  render();
+}
+
+/* ------------------------------------------------------------- main loop */
+let last=0;
+function frame(now){
+  if(!last) last=now;
+  let dt=(now-last)/1000;last=now;
+  dt=Math.min(dt,0.05);                 // never let a stall become a jump cut
+
+  if(!introDone){
+    introT+=dt;
+    if(introT>2.6) introDone=true;
+  }
+
+  if(MOCK_STATE) applyPayload(simulatedPayload(MOCK_STATE,now));
+  simulate(dt);
+  if(fly.active) updateFly(dt);
+  render();
+
+  fpsAcc+=dt;fpsN++;
+  if(fpsAcc>=0.5){fps=fpsN/fpsAcc;fpsAcc=0;fpsN=0;
+    if(showFps) elFps.textContent=fps.toFixed(0)+" fps";}
+
+  const st=S.stale?"stale→idle":S.state;
+  elTag.innerHTML='<span class="dot"></span><b>'+st+"</b> &nbsp;"+
+                  S.levelSmooth.toFixed(2)+(S.alert?" &nbsp;ALERT":"")+
+                  (MOCK_STATE?" &nbsp;sim":"");
+  elTag.classList.toggle("alert",S.alert);
+
+  requestAnimationFrame(frame);
+}
+
+/* --------------------------------------------------------------- controls */
+window.addEventListener("keydown",e=>{
+  if(!introDone){introDone=true;introT=99;
+    if(e.code==="Space")e.preventDefault();return;}
+  if(e.code==="Space"){
+    e.preventDefault();
+    if(fly.active){
+      if(!fly.bailing){fly.bailing=true;fly.bailT=0;
+        fly.from={x:cam.x,y:cam.y,zoom:cam.zoom,tilt:cam.tilt};}
+    }else startFly();
+  }else if(e.key==="f"||e.key==="F"){
+    showFps=!showFps;
+    elFps.style.opacity=showFps?"0.75":"0";
+  }
+});
+window.addEventListener("resize",resize);
+
+/* ------------------------------------------------------------------ boot */
+board=buildBoard(BOARD_SEED);
+bakeSprites();
+resize();
+
+if(FROZEN){
+  renderFrozen();
+}else{
+  if(!MOCK_STATE){poll();pollTimer=setInterval(poll,100);}
+  requestAnimationFrame(frame);
+}
+</script>
+</body>
+</html>
