@@ -1,0 +1,23 @@
+[project]
+name = "voice-line"
+version = "1.0.0"
+description = "Hands-free voice conversation with a warm Claude Agent SDK session"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "sounddevice>=0.4.6",
+    "webrtcvad>=2.0.10",
+    "numpy>=1.26",
+    "pynput>=1.7.7",
+    "claude-agent-sdk>=0.2.0",
+    "httpx>=0.27",
+    "psutil>=5.9",
+    # webrtcvad still imports pkg_resources at build time, which setuptools 81
+    # removed. Pinning below it is what makes `uv sync` succeed on a clean box.
+    "setuptools<81",
+    "pycaw>=20240210; sys_platform == 'win32'",
+    "comtypes>=1.4.1; sys_platform == 'win32'",
+]
+
+[tool.uv]
+# This is an app, not a library: do not try to build and install it.
+package = false

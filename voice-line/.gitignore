@@ -1,0 +1,10 @@
+.venv/
+uv.lock
+__pycache__/
+*.pyc
+
+# signal bus, written at runtime
+.voice_state
+.voice_state.tmp
+.voice_waveform
+.voice_loading_pid
