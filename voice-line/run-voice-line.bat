@@ -4,8 +4,12 @@ cd /d "%~dp0"
 
 where uv >nul 2>nul
 if errorlevel 1 (
+  rem No ^ escape before the pipe: it sits inside double quotes, so cmd already
+  rem treats it as literal and the caret would print, handing the user a
+  rem command that fails when pasted.
   echo uv is not on PATH. Install it with:
-  echo   powershell -c "irm https://astral.sh/uv/install.ps1 ^| iex"
+  echo   powershell -c "irm https://astral.sh/uv/install.ps1 | iex"
+  echo Then close and reopen your terminal so PATH picks it up.
   goto :fail
 )
 
