@@ -137,7 +137,31 @@ if (-not $SkipKokoro) {
     try {
         if (-not (Test-Path ".venv")) { uv venv --python 3.12 }
         Say "Installing dependencies..."
-        uv sync
+
+        # pyopenjtalk is skipped deliberately. Kokoro depends on misaki[ja]
+        # for Japanese, which pulls pyopenjtalk -- published as source only,
+        # so Windows tries to compile it and fails asking for Visual C++ and
+        # CMake. pyopenjtalk-plus is a fork of the same library published
+        # with wheels (cp39-cp314) that installs under the same `pyopenjtalk`
+        # module name, so the import still resolves if Kokoro ever reaches
+        # for it.
+        uv sync --no-install-package pyopenjtalk
+        if ($LASTEXITCODE -ne 0) {
+            throw "uv sync failed in $KokoroDir. Kokoro will not start until this succeeds."
+        }
+
+        uv pip install pyopenjtalk-plus
+        if ($LASTEXITCODE -ne 0) {
+            Say "pyopenjtalk-plus did not install. Kokoro should still serve English." "Yellow"
+        }
+
+        # Without this the script used to sail past a failed sync and write a
+        # launcher pointing at an environment with no uvicorn in it, which
+        # surfaces much later as "No module named uvicorn".
+        $uvicornProbe = & ".\.venv\Scripts\python.exe" -c "import uvicorn" 2>&1
+        if ($LASTEXITCODE -ne 0) {
+            throw "uvicorn is missing from $KokoroDir\.venv despite a clean sync: $uvicornProbe"
+        }
 
         if ($hasNvidia) {
             # THE SILENT ONE. `uv pip install -e ".[gpu]"` runs in uv's
