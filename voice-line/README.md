@@ -44,6 +44,26 @@ powershell -ExecutionPolicy Bypass -File scripts\check-servers.ps1
 `run-voice-line.bat` creates the uv-managed Python 3.12 environment on first
 run and launches from then on.
 
+### A Desktop shortcut
+
+To launch it without opening a terminal first:
+
+```powershell
+# no Administrator needed -- this only writes to your own Desktop
+powershell -ExecutionPolicy Bypass -File scripts\install-shortcut.ps1
+
+# bake in the flags you always use
+powershell -ExecutionPolicy Bypass -File scripts\install-shortcut.ps1 -Arguments "--voice elevenlabs"
+
+# and to undo
+powershell -ExecutionPolicy Bypass -File scripts\install-shortcut.ps1 -Uninstall
+```
+
+The shortcut opens a console window on purpose: you type into the voice line as
+well as talk to it, so a windowless launch would cost you half the interface.
+The servers still need to be up, which is what makes the services option below
+worth it if you use a Desktop shortcut.
+
 One Windows setting matters: **Settings > Privacy & security > Microphone >
 let desktop apps access your microphone** must be on. There is no other
 permission gate; the global key listener works in a normal console process.
