@@ -22,9 +22,12 @@ param(
     [int]$WhisperPort = 2022,
     [int]$KokoroPort = 8880,
     [string]$ServerDir = "$env:USERPROFILE\voice-line-servers",
-    # How long to wait for a freshly started server to answer. Whisper loads
-    # its model into memory first, so cold starts are slow.
-    [int]$ServerTimeoutSec = 90,
+    # How long to wait for a freshly started server to answer. Generous
+    # because the first Kokoro start is not just a process launch: it imports
+    # torch and loads its voice models, which on a cold CPU-only box runs to
+    # several minutes. Timing out early here looks identical to a crash and
+    # sends you hunting for an error that was never written.
+    [int]$ServerTimeoutSec = 420,
     # Install the servers without asking. Without this, a missing install
     # prompts first, because it is a long download.
     [switch]$Yes
