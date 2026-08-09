@@ -137,7 +137,52 @@ if (-not $SkipKokoro) {
     try {
         if (-not (Test-Path ".venv")) { uv venv --python 3.12 }
         Say "Installing dependencies..."
-        uv sync
+
+        # pyopenjtalk is skipped deliberately. Kokoro depends on misaki[ja]
+        # for Japanese, which pulls pyopenjtalk -- published as source only,
+        # so Windows tries to compile it and fails asking for Visual C++ and
+        # CMake. pyopenjtalk-plus is a fork of the same library published
+        # with wheels (cp39-cp314) that installs under the same `pyopenjtalk`
+        # module name, so the import still resolves if Kokoro ever reaches
+        # for it.
+        uv sync --no-install-package pyopenjtalk
+        if ($LASTEXITCODE -ne 0) {
+            throw "uv sync failed in $KokoroDir. Kokoro will not start until this succeeds."
+        }
+
+        uv pip install pyopenjtalk-plus
+        if ($LASTEXITCODE -ne 0) {
+            Say "pyopenjtalk-plus did not install. Kokoro should still serve English." "Yellow"
+        }
+
+        # Without this the script used to sail past a failed sync and write a
+        # launcher pointing at an environment with no uvicorn in it, which
+        # surfaces much later as "No module named uvicorn".
+        $uvicornProbe = & ".\.venv\Scripts\python.exe" -c "import uvicorn" 2>&1
+        if ($LASTEXITCODE -ne 0) {
+            throw "uvicorn is missing from $KokoroDir\.venv despite a clean sync: $uvicornProbe"
+        }
+
+        # The voice model is a separate download from the code, and nothing in
+        # `uv sync` fetches it. Without it Kokoro installs cleanly, starts,
+        # then kills itself during startup with FileNotFoundError on
+        # kokoro-v1_0.pth -- and because it exits 0, from the outside it just
+        # looks like a server that never came up.
+        $modelDir  = Join-Path $KokoroDir "api\src\models\v1_0"
+        $modelFile = Join-Path $modelDir "kokoro-v1_0.pth"
+        if (Test-Path $modelFile) {
+            Say "Voice model already present" "Green"
+        } else {
+            Say "Downloading the Kokoro voice model (about 330 MB)..."
+            & ".\.venv\Scripts\python.exe" "docker\scripts\download_model.py" --output "api/src/models/v1_0"
+            if ($LASTEXITCODE -ne 0) {
+                throw "Kokoro voice model download failed. Kokoro cannot start without it."
+            }
+            if (-not (Test-Path $modelFile)) {
+                throw "Download reported success but $modelFile is still missing."
+            }
+            Say "Voice model installed" "Green"
+        }
 
         if ($hasNvidia) {
             # THE SILENT ONE. `uv pip install -e ".[gpu]"` runs in uv's
@@ -164,10 +209,18 @@ if (-not $SkipKokoro) {
     }
 
     $startKokoro = Join-Path $InstallDir "start-kokoro.cmd"
+    # MODEL_DIR and VOICES_DIR are mandatory here, not tuning. Kokoro's
+    # defaults are the paths from inside its Docker image
+    # ("/app/api/src/models"), which on Windows it resolves to C:/app/... and
+    # never finds. It then reports the model as missing and exits 0, so it
+    # reads as a server that silently refused to start rather than a
+    # misconfigured path.
     @"
 @echo off
 cd /d "$KokoroDir"
 set USE_GPU=$(if ($hasNvidia) { "true" } else { "false" })
+set MODEL_DIR=$KokoroDir\api\src\models
+set VOICES_DIR=$KokoroDir\api\src\voices\v1_0
 "$KokoroDir\.venv\Scripts\python.exe" -m uvicorn api.src.main:app --host 127.0.0.1 --port $KokoroPort
 "@ | Set-Content -Path $startKokoro -Encoding ASCII
     Say "Start it with: $startKokoro" "Green"

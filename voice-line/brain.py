@@ -12,10 +12,13 @@ sitting silent through the whole tool run.
 
 from __future__ import annotations
 
+import json
 import re
+from datetime import datetime
 from typing import AsyncIterator
 
 import config
+import state as state_store
 
 try:
     from claude_agent_sdk import (
@@ -45,6 +48,13 @@ _HEADING = re.compile(r"^\s{0,3}#{1,6}\s*", re.M)
 _BULLET = re.compile(r"^\s{0,6}(?:[-*+•]|\d{1,2}[.)])\s+", re.M)
 _LINK = re.compile(r"\[([^\]]+)\]\([^)]+\)")
 _SYMBOL_LINE = re.compile(r"^[\s\-=_|:*#`~]+$", re.M)
+# Last-resort net: stream_turn's tail-holding is what's supposed to keep a
+# STATE_UPDATE line out of speech, but that logic only triggers on a real
+# newline before it. If the model ever glues it onto prior text without one,
+# this still keeps the raw JSON off the speakers -- everything from the
+# token to the end of the chunk is dropped, since nothing legitimate follows
+# a STATE_UPDATE per the prompt's contract.
+_STATE_LEAK = re.compile(r"STATE_UPDATE:.*", re.S)
 
 
 def clean_for_speech(text: str) -> str:
@@ -55,6 +65,7 @@ def clean_for_speech(text: str) -> str:
     """
     if not text:
         return ""
+    text = _STATE_LEAK.sub("", text)
     text = _FENCE.sub(" ", text)
     text = _OPEN_FENCE.sub(" ", text)
     text = _LINK.sub(r"\1", text)
@@ -165,19 +176,83 @@ class SentenceChunker:
 
 
 # ---------------------------------------------------------------------------
+# System prompt
+# ---------------------------------------------------------------------------
+
+
+def _build_append_prompt(state: dict, now: datetime | None = None) -> str:
+    """The text appended after the claude_code preset.
+
+    When prompts/jarvis-system-prompt.md exists, it carries identity and
+    spoken style, with the live <state> substituted in and the streaming
+    addendum bolted on after it. Otherwise fall back to the older
+    self-contained SPOKEN_DISCIPLINE, unchanged, so voice-line still works
+    dropped into a project that isn't this repo.
+
+    {{NOW}} and {{AGENDA}} matter more than they look. The prompt asks JARVIS
+    to lead with anything due inside forty-eight hours, which is not a
+    question a model can answer at all without being told the date -- and
+    asking it to do date arithmetic over raw ISO strings mid-sentence is a
+    good way to be told something false with total confidence. The agenda is
+    computed here, in Python, and handed over already resolved.
+    """
+    path = config.JARVIS_PROMPT_PATH
+    if path is None:
+        return config.SPOKEN_DISCIPLINE
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError:
+        return config.SPOKEN_DISCIPLINE
+    now = now or datetime.now()
+    text = text.replace("{{NOW}}", now.strftime("%A %d %B %Y, %I:%M %p").replace(" 0", " "))
+    text = text.replace("{{AGENDA}}", state_store.render_agenda(state, now))
+    text = text.replace("{{STATE_JSON}}", json.dumps(state, sort_keys=True))
+    return text + "\n\n" + config.STREAMING_ADDENDUM
+
+
+# ---------------------------------------------------------------------------
 # The session
 # ---------------------------------------------------------------------------
 
 
 class Brain:
     def __init__(self, project_dir: str | None = None, model: str = "",
-                 permission_mode: str | None = None, on_stderr=None):
+                 permission_mode: str | None = None, on_stderr=None,
+                 on_state_update=None, on_state_warning=None):
         self.project_dir = project_dir or config.PROJECT_DIR
         self.model = model or config.MODEL
         self.permission_mode = permission_mode or config.PERMISSION_MODE
         self._on_stderr = on_stderr
+        self._on_state_update = on_state_update
+        self._on_state_warning = on_state_warning
         self._client = None
         self.last_tool: str | None = None
+        self.state: dict = state_store.load()
+
+    def _apply_state_update(self, update: dict) -> None:
+        self.state = state_store.merge(self.state, update)
+        state_store.save(self.state)
+        if self._on_state_update is not None:
+            self._on_state_update(update)
+
+    def _resolve_tail(self, tail: str, chunker: "SentenceChunker") -> list[str]:
+        """Turn a held-back trailing line into speech, or into a state write.
+
+        Anything that opens with STATE_UPDATE: is never spoken, whether or
+        not it parses -- a malformed one is dropped and logged instead of
+        read aloud, per the prompt's own contract.
+        """
+        stripped = tail.strip()
+        if not stripped:
+            return []
+        if state_store.is_update_line(stripped):
+            update = state_store.extract_update(stripped)
+            if update is not None:
+                self._apply_state_update(update)
+            elif self._on_state_warning is not None:
+                self._on_state_warning(f"malformed STATE_UPDATE, dropped: {stripped[:160]}")
+            return []
+        return chunker.feed(tail)
 
     def _options(self):
         kwargs = dict(
@@ -185,7 +260,7 @@ class Brain:
             system_prompt={
                 "type": "preset",
                 "preset": "claude_code",
-                "append": config.SPOKEN_DISCIPLINE,
+                "append": _build_append_prompt(self.state),
             },
             tools={"type": "preset", "preset": "claude_code"},
             permission_mode=self.permission_mode,
@@ -217,10 +292,46 @@ class Brain:
             pass
 
     async def stream_turn(self, text: str) -> AsyncIterator[str]:
-        """Yield speakable chunks for one turn."""
+        """Yield speakable chunks for one turn.
+
+        A STATE_UPDATE line, if the model writes one, is the last line of the
+        whole response (see prompts/jarvis-system-prompt.md) and must never
+        reach the chunker or the speakers. Ordinary spoken prose has no
+        newlines in it, so once one appears mid-stream everything after it is
+        held back in `tail` instead of being fed to the chunker -- it's either
+        the start of a state update or just incidental trailing text. It only
+        gets resolved (spoken, or applied as state) once something proves it
+        wasn't the final line after all: a new content block starting, or the
+        turn ending.
+        """
         chunker = SentenceChunker()
         saw_stream_text = False
         self.last_tool = None
+        tail = ""
+        holding = False
+
+        def feed(piece: str) -> list[str]:
+            nonlocal tail, holding
+            if not piece:
+                return []
+            if not holding:
+                before, nl, after = piece.partition("\n")
+                if not nl:
+                    return chunker.feed(piece)
+                out = chunker.feed(before) if before else []
+                holding = True
+                tail = after
+                return out
+            tail += piece
+            return []
+
+        def release() -> list[str]:
+            nonlocal tail, holding
+            if not holding:
+                return []
+            holding = False
+            held, tail = tail, ""
+            return self._resolve_tail(held, chunker)
 
         await self._client.query(text)
         async for msg in self._client.receive_response():
@@ -235,14 +346,19 @@ class Brain:
                         piece = delta.get("text") or ""
                         if piece:
                             saw_stream_text = True
-                            for chunk in chunker.feed(piece):
+                            for chunk in feed(piece):
                                 yield chunk
                 elif etype == "content_block_start":
                     block = event.get("content_block") or {}
                     if block.get("type") == "tool_use":
                         self.last_tool = block.get("name")
+                    # A new block starting proves any held tail wasn't the
+                    # final line -- release it as ordinary speech.
+                    for chunk in release():
+                        yield chunk
                 elif etype == "content_block_stop":
-                    # The critical flush.
+                    # The critical flush -- but the held tail stays held,
+                    # since this block ending doesn't prove the turn is over.
                     for chunk in chunker.flush():
                         yield chunk
 
@@ -252,12 +368,16 @@ class Brain:
                 if not saw_stream_text:
                     for block in msg.content:
                         if isinstance(block, TextBlock) and block.text:
-                            for chunk in chunker.feed(block.text):
+                            for chunk in feed(block.text):
                                 yield chunk
+                    for chunk in release():
+                        yield chunk
                     for chunk in chunker.flush():
                         yield chunk
 
             elif isinstance(msg, ResultMessage):
+                for chunk in release():
+                    yield chunk
                 for chunk in chunker.flush():
                     yield chunk
                 break

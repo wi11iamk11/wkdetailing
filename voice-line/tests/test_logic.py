@@ -18,16 +18,19 @@ import tempfile
 import time
 import types
 import wave
+from datetime import datetime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+import claude_agent_sdk as sdk  # noqa: E402
 import brain  # noqa: E402
 import config  # noqa: E402
 import console  # noqa: E402
 import ducking  # noqa: E402
 import ears  # noqa: E402
 import signals  # noqa: E402
+import state as state_mod  # noqa: E402
 
 FAILURES: list[str] = []
 PASSES = 0
@@ -110,6 +113,232 @@ def test_clean_for_speech():
        "see the docs now")
     eq("clean.inline_code", brain.clean_for_speech("run `uv sync` first"),
        "run uv sync first")
+    # Last-resort net: even glued on with no newline, a STATE_UPDATE line
+    # must never reach speech.
+    eq("clean.state_leak",
+       brain.clean_for_speech('Done for today. STATE_UPDATE: {"x": 1}'),
+       "Done for today.")
+
+
+# ---------------------------------------------------------------------------
+# Durable state and the STATE_UPDATE line
+# ---------------------------------------------------------------------------
+
+
+def test_state_extract_and_merge():
+    eq("state.is_update_true", state_mod.is_update_line('STATE_UPDATE: {"a": 1}'), True)
+    eq("state.is_update_false", state_mod.is_update_line("just a sentence."), False)
+
+    eq("state.extract_ok",
+       state_mod.extract_update('STATE_UPDATE: {"deposit_cleared": true}'),
+       {"deposit_cleared": True})
+    eq("state.extract_bad_json", state_mod.extract_update("STATE_UPDATE: {not json"), None)
+    eq("state.extract_not_object", state_mod.extract_update("STATE_UPDATE: [1, 2]"), None)
+    eq("state.extract_wrong_prefix", state_mod.extract_update('{"a": 1}'), None)
+
+    merged = state_mod.merge({"a": 1, "b": 2}, {"b": 3, "c": 4})
+    eq("state.merge_overwrites_and_adds", merged, {"a": 1, "b": 3, "c": 4})
+
+
+def test_state_save_load_roundtrip():
+    with tempfile.TemporaryDirectory() as d:
+        path = Path(d) / "jarvis_state.json"
+        old_path = state_mod.STATE_PATH
+        state_mod.STATE_PATH = path
+        try:
+            eq("state.load_missing_file", state_mod.load(), {})
+            state_mod.save({"invoice_1042": "unpaid"})
+            eq("state.load_after_save", state_mod.load(), {"invoice_1042": "unpaid"})
+            check("state.tmp_not_left_behind", not path.with_suffix(".tmp").exists())
+
+            path.write_text("{not valid json", encoding="utf-8")
+            eq("state.load_corrupt_file_is_empty", state_mod.load(), {})
+        finally:
+            state_mod.STATE_PATH = old_path
+
+
+def test_state_list_merge_by_identity():
+    state = {"assignments": [
+        {"course": "CS 3400", "title": "Systems paper", "due": "2026-08-14T23:59",
+         "status": "open", "notes": "8 pages"},
+    ]}
+
+    # Marking it done must not wipe the due date or notes it already had.
+    merged = state_mod.merge(state, {"assignments": [
+        {"course": "CS 3400", "title": "Systems paper", "status": "done"}]})
+    eq("state.list_len_after_update", len(merged["assignments"]), 1)
+    eq("state.list_status_updated", merged["assignments"][0]["status"], "done")
+    eq("state.list_kept_due", merged["assignments"][0]["due"], "2026-08-14T23:59")
+    eq("state.list_kept_notes", merged["assignments"][0]["notes"], "8 pages")
+
+    # Identity ignores case and stray spacing, or a re-dictated title would
+    # silently become a second assignment.
+    merged = state_mod.merge(state, {"assignments": [
+        {"course": "cs 3400", "title": "  systems paper ", "status": "done"}]})
+    eq("state.list_identity_normalized", len(merged["assignments"]), 1)
+
+    # A genuinely different assignment appends.
+    merged = state_mod.merge(state, {"assignments": [
+        {"course": "CS 3400", "title": "Problem set 4", "due": "2026-08-17"}]})
+    eq("state.list_appends_new", len(merged["assignments"]), 2)
+
+    # The original is never mutated in place.
+    eq("state.merge_is_pure", state["assignments"][0]["status"], "open")
+
+    # Keys with no identity defined still replace wholesale.
+    merged = state_mod.merge({"cash": 100}, {"cash": 250})
+    eq("state.scalar_still_replaces", merged["cash"], 250)
+
+
+def test_state_parse_when():
+    eq("when.datetime", state_mod.parse_when("2026-08-14T23:59"),
+       datetime(2026, 8, 14, 23, 59))
+    # A bare date means end of day: "due Friday" is not overdue at breakfast.
+    eq("when.bare_date_is_end_of_day", state_mod.parse_when("2026-08-14"),
+       datetime(2026, 8, 14, 23, 59))
+    eq("when.garbage", state_mod.parse_when("sometime next week"), None)
+    eq("when.empty", state_mod.parse_when(""), None)
+    eq("when.wrong_type", state_mod.parse_when(None), None)
+    check("when.trailing_z", state_mod.parse_when("2026-08-14T10:00:00Z") is not None)
+
+
+def test_agenda():
+    now = datetime(2026, 8, 10, 9, 0)
+    state = {
+        "assignments": [
+            {"course": "CS 3400", "title": "Systems paper", "due": "2026-08-12T23:59"},
+            {"course": "CS 3400", "title": "Old essay", "due": "2026-08-08T23:59"},
+            {"course": "MATH 2400", "title": "Done already", "due": "2026-08-11",
+             "status": "done"},
+            {"course": "HIST 1010", "title": "Far future", "due": "2026-12-01"},
+            {"course": "CS 3400", "title": "No date at all"},
+        ],
+        "exams": [{"course": "MATH 2400", "title": "Midterm", "at": "2026-08-14T10:00"}],
+    }
+
+    entries = state_mod.upcoming(state, now)
+    titles = [e["title"] for e in entries]
+    eq("agenda.order_and_filter", titles, ["Old essay", "Systems paper", "Midterm"])
+    eq("agenda.overdue_flagged", entries[0]["overdue"], True)
+    eq("agenda.exam_kind", entries[2]["kind"], "exam")
+
+    rendered = state_mod.render_agenda(state, now)
+    check("agenda.marks_overdue", "OVERDUE" in rendered, rendered)
+    check("agenda.excludes_done", "Done already" not in rendered, rendered)
+    check("agenda.excludes_far_future", "Far future" not in rendered, rendered)
+    check("agenda.excludes_undated", "No date at all" not in rendered, rendered)
+
+    eq("agenda.empty_state", state_mod.render_agenda({}, now),
+       "Nothing dated is open in the next two weeks.")
+
+
+def test_prompt_substitution_fills_clock_and_agenda():
+    now = datetime(2026, 8, 10, 9, 0)
+    state = {"assignments": [
+        {"course": "CS 3400", "title": "Systems paper", "due": "2026-08-12T23:59"}]}
+    built = brain._build_append_prompt(state, now)
+
+    check("prompt.no_placeholders_left",
+          "{{" not in built, [c for c in built.split() if "{{" in c])
+    check("prompt.has_date", "August 2026" in built, built[:200])
+    check("prompt.has_agenda_item", "Systems paper" in built)
+    check("prompt.has_streaming_addendum", "voice_mode" in built)
+
+
+class _FakeClient:
+    """Stands in for ClaudeSDKClient: query() is a no-op, receive_response()
+    replays a canned list of SDK messages."""
+
+    def __init__(self, messages):
+        self._messages = messages
+
+    async def query(self, text):
+        pass
+
+    async def receive_response(self):
+        for msg in self._messages:
+            yield msg
+
+
+def _delta_event(text):
+    return sdk.StreamEvent(uuid="u", session_id="s",
+                           event={"type": "content_block_delta",
+                                  "delta": {"type": "text_delta", "text": text}})
+
+
+def _block_start_event(block_type="text"):
+    return sdk.StreamEvent(uuid="u", session_id="s",
+                           event={"type": "content_block_start",
+                                  "content_block": {"type": block_type}})
+
+
+def _block_stop_event():
+    return sdk.StreamEvent(uuid="u", session_id="s",
+                           event={"type": "content_block_stop"})
+
+
+def _result_message():
+    return sdk.ResultMessage(subtype="success", duration_ms=0, duration_api_ms=0,
+                             is_error=False, num_turns=1, session_id="s")
+
+
+def _run_turn(brain_obj, messages):
+    brain_obj._client = _FakeClient(messages)
+
+    async def collect():
+        return [c async for c in brain_obj.stream_turn("hi")]
+
+    return asyncio.run(collect())
+
+
+def test_stream_turn_state_update_not_spoken():
+    with tempfile.TemporaryDirectory() as d:
+        state_mod.STATE_PATH = Path(d) / "jarvis_state.json"
+        updates = []
+        b = brain.Brain(on_state_update=lambda u: updates.append(u))
+        chunks = _run_turn(b, [
+            _delta_event("Client draft goes first. "),
+            _delta_event('\nSTATE_UPDATE: {"deposit_cleared": true}'),
+            _block_stop_event(),
+            _result_message(),
+        ])
+        eq("stream.speaks_only_prose", chunks, ["Client draft goes first."])
+        eq("stream.state_applied", b.state, {"deposit_cleared": True})
+        eq("stream.callback_fired", updates, [{"deposit_cleared": True}])
+        eq("stream.persisted_to_disk", state_mod.load(), {"deposit_cleared": True})
+
+
+def test_stream_turn_malformed_state_update_dropped():
+    with tempfile.TemporaryDirectory() as d:
+        state_mod.STATE_PATH = Path(d) / "jarvis_state.json"
+        warnings = []
+        b = brain.Brain(on_state_warning=lambda m: warnings.append(m))
+        chunks = _run_turn(b, [
+            _delta_event("Noted. "),
+            _delta_event("\nSTATE_UPDATE: {not valid json"),
+            _block_stop_event(),
+            _result_message(),
+        ])
+        eq("stream.malformed_not_spoken", chunks, ["Noted."])
+        eq("stream.malformed_state_unchanged", b.state, {})
+        check("stream.malformed_warned", len(warnings) == 1, warnings)
+        check("stream.malformed_not_persisted", not state_mod.STATE_PATH.exists())
+
+
+def test_stream_turn_holds_tail_until_block_boundary():
+    with tempfile.TemporaryDirectory() as d:
+        state_mod.STATE_PATH = Path(d) / "jarvis_state.json"
+        b = brain.Brain()
+        chunks = _run_turn(b, [
+            _delta_event("On it, one moment.\n"),
+            _block_start_event("tool_use"),  # proves the held text wasn't final
+            _delta_event("Found it."),
+            _block_stop_event(),
+            _result_message(),
+        ])
+        spoken = " ".join(chunks)
+        check("stream.held_text_not_lost", "one moment" in spoken, spoken)
+        check("stream.held_text_not_treated_as_state", b.state == {}, b.state)
 
 
 # ---------------------------------------------------------------------------

@@ -22,6 +22,7 @@ import time
 import config
 import ears
 import signals
+import state
 from brain import Brain
 from console import ConsoleReader
 from ducking import NullDucker, SpotifyDucker
@@ -79,7 +80,9 @@ class VoiceLine:
         self.mouth.on_speaking_end = self._on_speaking_end
 
         self.brain = Brain(project_dir=args.project, model=args.model,
-                           permission_mode="bypassPermissions" if args.yolo else None)
+                           permission_mode="bypassPermissions" if args.yolo else None,
+                           on_state_update=lambda u: log(f"[state] {u}"),
+                           on_state_warning=lambda m: log(f"[state] {m}", C_WARN))
         self.ptt: PushToTalk | None = None
         self.console: ConsoleReader | None = None
 
@@ -103,6 +106,10 @@ class VoiceLine:
     async def setup(self) -> None:
         signals.reset()
         log(f"project    {self.brain.project_dir}")
+        if config.JARVIS_PROMPT_PATH is not None:
+            log(f"prompt     {config.JARVIS_PROMPT_PATH} (state: {state.STATE_PATH})")
+        else:
+            log("prompt     no prompts/jarvis-system-prompt.md found, using SPOKEN_DISCIPLINE")
 
         route = await self.transcriber.probe()
         log(f"whisper    {config.WHISPER_BASE}{route}")
@@ -140,7 +147,7 @@ class VoiceLine:
 
         print()
         log("hold-to-talk key also works as INTERRUPT at any time. "
-            "Type to talk. Say goodbye to hang up.\n")
+            "Type to talk. Type agenda for what's due. Say goodbye to hang up.\n")
 
         # Hide the first-turn prompt-cache toll behind the greeting.
         self.mouth.say(config.GREETING)
@@ -192,6 +199,13 @@ class VoiceLine:
                 self.muted = False
                 self.mic.gate(False)
                 log("[mic live]")
+                self._prompt()
+                return
+            if lowered in ("agenda", "/agenda"):
+                # Reading it off the screen is faster than asking out loud and
+                # waiting for it to be spoken, and it costs no tokens.
+                print(state.render_agenda(self.brain.state))
+                log(f"[state file: {state.STATE_PATH}]")
                 self._prompt()
                 return
 
@@ -376,7 +390,8 @@ def parse_args(argv=None):
     p.add_argument("--wake", default=None, help=f"wake word (default {config.WAKE_WORD})")
     p.add_argument("--key", default=config.PTT_KEY,
                    help="hold-to-talk / interrupt key (default ctrl_r)")
-    p.add_argument("--voice", choices=("kokoro", "elevenlabs"), default="kokoro")
+    p.add_argument("--voice", choices=config.VOICE_CHOICES, default=config.VOICE,
+                   help=f"TTS engine (default {config.VOICE}, from VOICE_LINE_VOICE)")
     p.add_argument("--voice-id", default="", help="ElevenLabs voice id")
     p.add_argument("--no-master", action="store_true",
                    help="skip the local ffmpeg mastering chain on ElevenLabs audio")
@@ -389,6 +404,12 @@ def parse_args(argv=None):
     p.add_argument("--output-device", default=None, help="output device index or name")
     p.add_argument("--list-devices", action="store_true", help="list audio devices and exit")
     args = p.parse_args(argv)
+    # argparse validates `choices` for arguments that are passed, but not for a
+    # default -- so a typo in VOICE_LINE_VOICE would sail through and only
+    # surface as a silent fallback to Kokoro inside build_engine.
+    if args.voice not in config.VOICE_CHOICES:
+        p.error(f"VOICE_LINE_VOICE is {args.voice!r}; expected one of "
+                f"{', '.join(config.VOICE_CHOICES)}")
     for attr in ("input_device", "output_device"):
         val = getattr(args, attr)
         if val is not None and str(val).isdigit():

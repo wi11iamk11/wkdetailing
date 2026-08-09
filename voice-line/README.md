@@ -21,6 +21,15 @@ saying the name again.
 
 ## Install
 
+If you just want it running, clone the repo and double-click
+`start-jarvis.bat`. It checks for `uv`, offers to install the two speech
+servers if they are missing, starts them, waits for them, and launches the
+voice line -- skipping whichever of those is already done. `scripts\install-shortcut.ps1`
+puts it on the Desktop.
+
+The rest of this section is the same thing done by hand, which is worth
+reading once so you know what the one-click path is actually doing.
+
 Copy this folder to `%USERPROFILE%\voice-line` (that is where the rest of this
 doc assumes it lives), then:
 
@@ -43,6 +52,26 @@ powershell -ExecutionPolicy Bypass -File scripts\check-servers.ps1
 
 `run-voice-line.bat` creates the uv-managed Python 3.12 environment on first
 run and launches from then on.
+
+### A Desktop shortcut
+
+To launch it without opening a terminal first:
+
+```powershell
+# no Administrator needed -- this only writes to your own Desktop
+powershell -ExecutionPolicy Bypass -File scripts\install-shortcut.ps1
+
+# bake in the flags you always use
+powershell -ExecutionPolicy Bypass -File scripts\install-shortcut.ps1 -Arguments "--voice elevenlabs"
+
+# and to undo
+powershell -ExecutionPolicy Bypass -File scripts\install-shortcut.ps1 -Uninstall
+```
+
+The shortcut opens a console window on purpose: you type into the voice line as
+well as talk to it, so a windowless launch would cost you half the interface.
+The servers still need to be up, which is what makes the services option below
+worth it if you use a Desktop shortcut.
 
 One Windows setting matters: **Settings > Privacy & security > Microphone >
 let desktop apps access your microphone** must be on. There is no other
@@ -99,6 +128,17 @@ To switch:
    setx ELEVENLABS_VOICE_ID "voice_id_here"
    ```
    or pass `--voice-id` on the command line.
+5. Make ElevenLabs the default, so the Desktop shortcut and every other
+   launch use it without a flag:
+   ```powershell
+   setx VOICE_LINE_VOICE "elevenlabs"
+   ```
+   `--voice kokoro` still overrides it for one run.
+
+On a machine with no Nvidia GPU this is the difference between usable and
+not: Kokoro synthesises on the CPU, competing with whisper for the same
+cores, while ElevenLabs does the work remotely and leaves the CPU to the
+transcription.
 
 Their site previews are mastered demo clips, so raw API output never sounds
 like them. This is handled: audio comes back as `mp3_44100_128` (raw PCM at
@@ -108,6 +148,45 @@ and gets decoded and mastered locally with ffmpeg -- presence lift around
 model, stability 0.5, similarity 0.75, style 0. Do not raise style and do not
 use the multilingual model for English; both make the delivery slow and dull.
 Pass `--no-master` to hear the unmastered version.
+
+---
+
+## Coursework
+
+When `prompts/jarvis-system-prompt.md` is found, the session runs as JARVIS
+and keeps durable state in `jarvis_state.json` next to this folder. Three keys
+carry school: `courses`, `assignments`, `exams`.
+
+You never edit that file by hand. Say it out loud:
+
+> "Jarvis, the systems paper is due Friday at midnight, eight pages."
+
+It writes a `STATE_UPDATE` line at the end of its turn, which is stripped
+before speech and merged into the file. Next launch, it knows.
+
+Two things make this work rather than merely store data:
+
+**It knows what time it is.** Every launch substitutes the current date into
+`<now>` and a computed `<agenda>` into the prompt -- what is overdue, what is
+imminent, already resolved into "in 4 hours" and "OVERDUE by 9 hours". The
+model is never asked to do date arithmetic on ISO strings, which is exactly
+the kind of thing it will get wrong fluently.
+
+**Lists merge by identity.** `assignments` match on course plus title, so
+finishing one is a four-word update:
+
+```
+STATE_UPDATE: {"assignments":[{"course":"CS 3400","title":"Systems paper","status":"done"}]}
+```
+
+The due date and notes survive. Without this, adding one assignment would
+mean re-dictating every assignment through a speech pipeline in a single JSON
+line, and losing the semester to one dropped token.
+
+Type `agenda` into the console for what's due, without spending a turn on it.
+
+The agenda is computed at launch, so something added mid-session shows up in
+the conversation immediately but not in `<agenda>` until next start.
 
 ---
 
