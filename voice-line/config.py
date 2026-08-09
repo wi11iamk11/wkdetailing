@@ -141,7 +141,23 @@ def _default_project_dir() -> str:
     return str(Path.home())
 
 
+def _default_jarvis_prompt_path() -> Path | None:
+    """The versioned JARVIS system prompt, if this checkout has one.
+
+    voice-line is designed to be dropped into any project (see
+    _default_project_dir above), so a missing prompts/ directory is normal,
+    not an error -- brain.py falls back to the plain SPOKEN_DISCIPLINE text
+    when this is None.
+    """
+    env = os.environ.get("VOICE_LINE_JARVIS_PROMPT")
+    if env:
+        return Path(env)
+    candidate = ROOT.parent / "prompts" / "jarvis-system-prompt.md"
+    return candidate if candidate.exists() else None
+
+
 PROJECT_DIR = _default_project_dir()
+JARVIS_PROMPT_PATH = _default_jarvis_prompt_path()
 MODEL = _s("VOICE_LINE_MODEL", "")  # empty means the CLI default
 PERMISSION_MODE = _s("VOICE_LINE_PERMISSION_MODE", "acceptEdits")
 TURN_TIMEOUT_S = _f("VOICE_LINE_TURN_TIMEOUT", 240.0)
@@ -154,6 +170,11 @@ QUIT_PHRASES = ("goodbye", "end voice mode", "hang up")
 FIRST_CHUNK_SENTENCES = 1
 BREATH_SENTENCES = _i("VOICE_LINE_BREATH", 2)
 
+# Full fallback discipline, used when no versioned JARVIS prompt is found
+# (see _default_jarvis_prompt_path above) -- e.g. voice-line dropped into a
+# project that isn't this repo. Covers both spoken style and streaming
+# mechanics on its own, since there's no prompts/jarvis-system-prompt.md to
+# carry the style half.
 SPOKEN_DISCIPLINE = """
 <voice_mode>
 You are being heard, not read. Everything you write is spoken aloud by a
@@ -179,6 +200,25 @@ Write for the ear:
   sentence on its own sounds abrupt.
 - Before any tool call that will take a moment, say one short natural line
   about what you are about to do, so the silence is explained. Then do it.
+</voice_mode>
+""".strip()
+
+# Appended after the versioned JARVIS prompt instead of SPOKEN_DISCIPLINE.
+# The JARVIS prompt already covers spoken style (THE SPOKEN CONSTRAINT); this
+# covers only what's specific to voice-line's streaming mechanics, so the two
+# documents don't say the same thing twice and drift out of sync.
+STREAMING_ADDENDUM = """
+<voice_mode>
+You are being heard, not read. Text you write is spoken aloud through desk
+speakers, one sentence at a time, streamed to the speakers as you generate
+it -- once a sentence is out, it has already been spoken.
+
+Before any tool call that will take a moment, say one short natural line
+about what you are about to do, so the silence during the call is explained.
+Then do it.
+
+After your first sentence, think in two-sentence breaths. A lone short
+sentence on its own sounds abrupt.
 </voice_mode>
 """.strip()
 

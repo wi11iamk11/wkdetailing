@@ -8,3 +8,7 @@ __pycache__/
 .voice_state.tmp
 .voice_waveform
 .voice_loading_pid
+
+# JARVIS durable state, written at runtime
+jarvis_state.json
+jarvis_state.tmp

@@ -22,6 +22,7 @@ import time
 import config
 import ears
 import signals
+import state
 from brain import Brain
 from console import ConsoleReader
 from ducking import NullDucker, SpotifyDucker
@@ -79,7 +80,9 @@ class VoiceLine:
         self.mouth.on_speaking_end = self._on_speaking_end
 
         self.brain = Brain(project_dir=args.project, model=args.model,
-                           permission_mode="bypassPermissions" if args.yolo else None)
+                           permission_mode="bypassPermissions" if args.yolo else None,
+                           on_state_update=lambda u: log(f"[state] {u}"),
+                           on_state_warning=lambda m: log(f"[state] {m}", C_WARN))
         self.ptt: PushToTalk | None = None
         self.console: ConsoleReader | None = None
 
@@ -103,6 +106,10 @@ class VoiceLine:
     async def setup(self) -> None:
         signals.reset()
         log(f"project    {self.brain.project_dir}")
+        if config.JARVIS_PROMPT_PATH is not None:
+            log(f"prompt     {config.JARVIS_PROMPT_PATH} (state: {state.STATE_PATH})")
+        else:
+            log("prompt     no prompts/jarvis-system-prompt.md found, using SPOKEN_DISCIPLINE")
 
         route = await self.transcriber.probe()
         log(f"whisper    {config.WHISPER_BASE}{route}")
