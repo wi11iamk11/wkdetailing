@@ -113,7 +113,13 @@ PREROLL_MS = _i("VOICE_LINE_PREROLL_MS", 300)
 
 WAKE_WORD = _s("VOICE_LINE_WAKE_WORD", "jarvis")
 # Whisper mishears proper nouns; these are the spellings it actually produces.
-WAKE_VARIANTS = ("jarvis", "jarvus", "jervis", "javis", "jarviss", "jarvi", "charvis")
+# Everything from "churgis" on was produced by whisper transcribing a real
+# person saying "Jarvis" -- they are too far from it (edit distance 4 and 6)
+# for the fuzzy matcher to reach, so they have to be listed. "journalist" is
+# an ordinary English word and will trigger on its own; drop it from this
+# list if you ever find yourself talking about the press.
+WAKE_VARIANTS = ("jarvis", "jarvus", "jervis", "javis", "jarviss", "jarvi", "charvis",
+                 "churgis", "chervis", "journalist")
 # After a reply, keep listening without the wake word for this long.
 FOLLOW_UP_WINDOW_S = _f("VOICE_LINE_FOLLOW_UP", 15.0)
 
