@@ -5,9 +5,11 @@
     Does NOT need Administrator: this only writes a .lnk into your own Desktop
     folder. (install-services.ps1 is the one that needs elevation.)
 
-    The shortcut points at run-voice-line.bat, which is what keeps a console
-    window open -- the voice line is a console app and you type into it, so a
-    windowless launch would take the typed-input half of the interface away.
+    The shortcut points at start-jarvis.bat rather than run-voice-line.bat:
+    the voice line is useless without the two speech servers, so the icon has
+    to bring those up too or it just fails on a cold machine. A console window
+    stays open either way, which the voice line needs -- you type into it as
+    well as talk to it.
 
     Two gotchas are handled here:
 
@@ -39,7 +41,7 @@ function Say($m, $c = "Gray") { Write-Host $m -ForegroundColor $c }
 # Resolve the launcher relative to this script, so the shortcut is correct no
 # matter where the repo lives or which directory you run this from.
 $voiceLineDir = Split-Path $PSScriptRoot -Parent
-$launcher     = Join-Path $voiceLineDir "run-voice-line.bat"
+$launcher     = Join-Path $voiceLineDir "start-jarvis.bat"
 
 $desktop  = [Environment]::GetFolderPath('Desktop')
 if (-not $desktop) { throw "Could not resolve your Desktop folder." }
@@ -71,7 +73,6 @@ $shortcut.Save()
 Say "Created $linkPath" "Green"
 Say "  target    $launcher"
 if ($Arguments) { Say "  arguments $Arguments" }
-Say "`nThe servers still need to be running. Check them with:" "Cyan"
-Say "  powershell -File scripts\check-servers.ps1" "Cyan"
+Say "`nDouble-click it to start. It brings the speech servers up itself." "Cyan"
 Say "Remove the shortcut with:" "Cyan"
 Say "  powershell -File scripts\install-shortcut.ps1 -Uninstall" "Cyan"

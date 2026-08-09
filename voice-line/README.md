@@ -21,6 +21,15 @@ saying the name again.
 
 ## Install
 
+If you just want it running, clone the repo and double-click
+`start-jarvis.bat`. It checks for `uv`, offers to install the two speech
+servers if they are missing, starts them, waits for them, and launches the
+voice line -- skipping whichever of those is already done. `scripts\install-shortcut.ps1`
+puts it on the Desktop.
+
+The rest of this section is the same thing done by hand, which is worth
+reading once so you know what the one-click path is actually doing.
+
 Copy this folder to `%USERPROFILE%\voice-line` (that is where the rest of this
 doc assumes it lives), then:
 
