@@ -209,10 +209,18 @@ if (-not $SkipKokoro) {
     }
 
     $startKokoro = Join-Path $InstallDir "start-kokoro.cmd"
+    # MODEL_DIR and VOICES_DIR are mandatory here, not tuning. Kokoro's
+    # defaults are the paths from inside its Docker image
+    # ("/app/api/src/models"), which on Windows it resolves to C:/app/... and
+    # never finds. It then reports the model as missing and exits 0, so it
+    # reads as a server that silently refused to start rather than a
+    # misconfigured path.
     @"
 @echo off
 cd /d "$KokoroDir"
 set USE_GPU=$(if ($hasNvidia) { "true" } else { "false" })
+set MODEL_DIR=$KokoroDir\api\src\models
+set VOICES_DIR=$KokoroDir\api\src\voices\v1_0
 "$KokoroDir\.venv\Scripts\python.exe" -m uvicorn api.src.main:app --host 127.0.0.1 --port $KokoroPort
 "@ | Set-Content -Path $startKokoro -Encoding ASCII
     Say "Start it with: $startKokoro" "Green"
