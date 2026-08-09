@@ -147,7 +147,7 @@ class VoiceLine:
 
         print()
         log("hold-to-talk key also works as INTERRUPT at any time. "
-            "Type to talk. Say goodbye to hang up.\n")
+            "Type to talk. Type agenda for what's due. Say goodbye to hang up.\n")
 
         # Hide the first-turn prompt-cache toll behind the greeting.
         self.mouth.say(config.GREETING)
@@ -199,6 +199,13 @@ class VoiceLine:
                 self.muted = False
                 self.mic.gate(False)
                 log("[mic live]")
+                self._prompt()
+                return
+            if lowered in ("agenda", "/agenda"):
+                # Reading it off the screen is faster than asking out loud and
+                # waiting for it to be spoken, and it costs no tokens.
+                print(state.render_agenda(self.brain.state))
+                log(f"[state file: {state.STATE_PATH}]")
                 self._prompt()
                 return
 

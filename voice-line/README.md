@@ -151,6 +151,45 @@ Pass `--no-master` to hear the unmastered version.
 
 ---
 
+## Coursework
+
+When `prompts/jarvis-system-prompt.md` is found, the session runs as JARVIS
+and keeps durable state in `jarvis_state.json` next to this folder. Three keys
+carry school: `courses`, `assignments`, `exams`.
+
+You never edit that file by hand. Say it out loud:
+
+> "Jarvis, the systems paper is due Friday at midnight, eight pages."
+
+It writes a `STATE_UPDATE` line at the end of its turn, which is stripped
+before speech and merged into the file. Next launch, it knows.
+
+Two things make this work rather than merely store data:
+
+**It knows what time it is.** Every launch substitutes the current date into
+`<now>` and a computed `<agenda>` into the prompt -- what is overdue, what is
+imminent, already resolved into "in 4 hours" and "OVERDUE by 9 hours". The
+model is never asked to do date arithmetic on ISO strings, which is exactly
+the kind of thing it will get wrong fluently.
+
+**Lists merge by identity.** `assignments` match on course plus title, so
+finishing one is a four-word update:
+
+```
+STATE_UPDATE: {"assignments":[{"course":"CS 3400","title":"Systems paper","status":"done"}]}
+```
+
+The due date and notes survive. Without this, adding one assignment would
+mean re-dictating every assignment through a speech pipeline in a single JSON
+line, and losing the semester to one dropped token.
+
+Type `agenda` into the console for what's due, without spending a turn on it.
+
+The agenda is computed at launch, so something added mid-session shows up in
+the conversation immediately but not in `<agenda>` until next start.
+
+---
+
 ## Modes
 
 | | hands free (default) | hold-to-talk (`--ptt`) |

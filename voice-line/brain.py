@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import re
+from datetime import datetime
 from typing import AsyncIterator
 
 import config
@@ -179,7 +180,7 @@ class SentenceChunker:
 # ---------------------------------------------------------------------------
 
 
-def _build_append_prompt(state: dict) -> str:
+def _build_append_prompt(state: dict, now: datetime | None = None) -> str:
     """The text appended after the claude_code preset.
 
     When prompts/jarvis-system-prompt.md exists, it carries identity and
@@ -187,6 +188,13 @@ def _build_append_prompt(state: dict) -> str:
     addendum bolted on after it. Otherwise fall back to the older
     self-contained SPOKEN_DISCIPLINE, unchanged, so voice-line still works
     dropped into a project that isn't this repo.
+
+    {{NOW}} and {{AGENDA}} matter more than they look. The prompt asks JARVIS
+    to lead with anything due inside forty-eight hours, which is not a
+    question a model can answer at all without being told the date -- and
+    asking it to do date arithmetic over raw ISO strings mid-sentence is a
+    good way to be told something false with total confidence. The agenda is
+    computed here, in Python, and handed over already resolved.
     """
     path = config.JARVIS_PROMPT_PATH
     if path is None:
@@ -195,6 +203,9 @@ def _build_append_prompt(state: dict) -> str:
         text = path.read_text(encoding="utf-8")
     except OSError:
         return config.SPOKEN_DISCIPLINE
+    now = now or datetime.now()
+    text = text.replace("{{NOW}}", now.strftime("%A %d %B %Y, %I:%M %p").replace(" 0", " "))
+    text = text.replace("{{AGENDA}}", state_store.render_agenda(state, now))
     text = text.replace("{{STATE_JSON}}", json.dumps(state, sort_keys=True))
     return text + "\n\n" + config.STREAMING_ADDENDUM
 
