@@ -60,6 +60,12 @@ KOKORO_TIMEOUT_S = _f("VOICE_LINE_KOKORO_TIMEOUT", 30.0)
 # ElevenLabs (optional, Kokoro stays wired in as the automatic fallback)
 # --------------------------------------------------------------------------
 
+# Which engine to use when --voice is not passed. Exists so the choice can be
+# made once, in the environment, and then hold for the Desktop shortcut and
+# every other launch that has nowhere convenient to put a flag.
+VOICE = _s("VOICE_LINE_VOICE", "kokoro")
+VOICE_CHOICES = ("kokoro", "elevenlabs")
+
 ELEVEN_API_KEY_ENV = "ELEVENLABS_API_KEY"
 ELEVEN_BASE = "https://api.elevenlabs.io/v1"
 # Pick any voice from https://elevenlabs.io/app/voice-library and paste its id

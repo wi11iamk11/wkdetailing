@@ -128,6 +128,17 @@ To switch:
    setx ELEVENLABS_VOICE_ID "voice_id_here"
    ```
    or pass `--voice-id` on the command line.
+5. Make ElevenLabs the default, so the Desktop shortcut and every other
+   launch use it without a flag:
+   ```powershell
+   setx VOICE_LINE_VOICE "elevenlabs"
+   ```
+   `--voice kokoro` still overrides it for one run.
+
+On a machine with no Nvidia GPU this is the difference between usable and
+not: Kokoro synthesises on the CPU, competing with whisper for the same
+cores, while ElevenLabs does the work remotely and leaves the CPU to the
+transcription.
 
 Their site previews are mastered demo clips, so raw API output never sounds
 like them. This is handled: audio comes back as `mp3_44100_128` (raw PCM at

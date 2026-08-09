@@ -383,7 +383,8 @@ def parse_args(argv=None):
     p.add_argument("--wake", default=None, help=f"wake word (default {config.WAKE_WORD})")
     p.add_argument("--key", default=config.PTT_KEY,
                    help="hold-to-talk / interrupt key (default ctrl_r)")
-    p.add_argument("--voice", choices=("kokoro", "elevenlabs"), default="kokoro")
+    p.add_argument("--voice", choices=config.VOICE_CHOICES, default=config.VOICE,
+                   help=f"TTS engine (default {config.VOICE}, from VOICE_LINE_VOICE)")
     p.add_argument("--voice-id", default="", help="ElevenLabs voice id")
     p.add_argument("--no-master", action="store_true",
                    help="skip the local ffmpeg mastering chain on ElevenLabs audio")
@@ -396,6 +397,12 @@ def parse_args(argv=None):
     p.add_argument("--output-device", default=None, help="output device index or name")
     p.add_argument("--list-devices", action="store_true", help="list audio devices and exit")
     args = p.parse_args(argv)
+    # argparse validates `choices` for arguments that are passed, but not for a
+    # default -- so a typo in VOICE_LINE_VOICE would sail through and only
+    # surface as a silent fallback to Kokoro inside build_engine.
+    if args.voice not in config.VOICE_CHOICES:
+        p.error(f"VOICE_LINE_VOICE is {args.voice!r}; expected one of "
+                f"{', '.join(config.VOICE_CHOICES)}")
     for attr in ("input_device", "output_device"):
         val = getattr(args, attr)
         if val is not None and str(val).isdigit():
