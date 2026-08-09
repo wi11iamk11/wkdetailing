@@ -163,6 +163,27 @@ if (-not $SkipKokoro) {
             throw "uvicorn is missing from $KokoroDir\.venv despite a clean sync: $uvicornProbe"
         }
 
+        # The voice model is a separate download from the code, and nothing in
+        # `uv sync` fetches it. Without it Kokoro installs cleanly, starts,
+        # then kills itself during startup with FileNotFoundError on
+        # kokoro-v1_0.pth -- and because it exits 0, from the outside it just
+        # looks like a server that never came up.
+        $modelDir  = Join-Path $KokoroDir "api\src\models\v1_0"
+        $modelFile = Join-Path $modelDir "kokoro-v1_0.pth"
+        if (Test-Path $modelFile) {
+            Say "Voice model already present" "Green"
+        } else {
+            Say "Downloading the Kokoro voice model (about 330 MB)..."
+            & ".\.venv\Scripts\python.exe" "docker\scripts\download_model.py" --output "api/src/models/v1_0"
+            if ($LASTEXITCODE -ne 0) {
+                throw "Kokoro voice model download failed. Kokoro cannot start without it."
+            }
+            if (-not (Test-Path $modelFile)) {
+                throw "Download reported success but $modelFile is still missing."
+            }
+            Say "Voice model installed" "Green"
+        }
+
         if ($hasNvidia) {
             # THE SILENT ONE. `uv pip install -e ".[gpu]"` runs in uv's
             # pip-compatible legacy mode, which ignores the project's custom
