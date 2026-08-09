@@ -1,0 +1,82 @@
+{
+  "name": "ViceHeights",
+  "tree": {
+    "$className": "DataModel",
+
+    "ReplicatedStorage": {
+      "$className": "ReplicatedStorage",
+      "Shared": {
+        "$path": "src/shared"
+      }
+    },
+
+    "ServerScriptService": {
+      "$className": "ServerScriptService",
+      "Server": {
+        "$path": "src/server"
+      }
+    },
+
+    "StarterPlayer": {
+      "$className": "StarterPlayer",
+      "$properties": {
+        "CharacterWalkSpeed": 18,
+        "CharacterJumpPower": 50,
+        "CharacterMaxSlopeAngle": 60,
+        "EnableMouseLockOption": true,
+        "CameraMaxZoomDistance": 60,
+        "CameraMinZoomDistance": 6
+      },
+      "StarterPlayerScripts": {
+        "$className": "StarterPlayerScripts",
+        "Client": {
+          "$path": "src/client"
+        }
+      }
+    },
+
+    "Players": {
+      "$className": "Players",
+      "$properties": {
+        "CharacterAutoLoads": true,
+        "RespawnTime": 4
+      }
+    },
+
+    "Workspace": {
+      "$className": "Workspace",
+      "$properties": {
+        "StreamingEnabled": true,
+        "StreamingMinRadius": 320,
+        "StreamingTargetRadius": 1024,
+        "FallenPartsDestroyHeight": -400,
+        "Gravity": 196.2
+      }
+    },
+
+    "Lighting": {
+      "$className": "Lighting",
+      "$properties": {
+        "Ambient": [0.16, 0.16, 0.2],
+        "OutdoorAmbient": [0.42, 0.43, 0.5],
+        "Brightness": 2.4,
+        "ClockTime": 14.5,
+        "GeographicLatitude": 25,
+        "GlobalShadows": true,
+        "EnvironmentDiffuseScale": 0.45,
+        "EnvironmentSpecularScale": 0.35,
+        "ExposureCompensation": 0.15,
+        "FogColor": [0.68, 0.72, 0.79],
+        "FogStart": 400,
+        "FogEnd": 2600
+      }
+    },
+
+    "SoundService": {
+      "$className": "SoundService",
+      "$properties": {
+        "RespectFilteringEnabled": true
+      }
+    }
+  }
+}
